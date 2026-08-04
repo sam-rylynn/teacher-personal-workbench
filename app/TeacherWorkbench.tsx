@@ -229,6 +229,8 @@ export default function TeacherWorkbench() {
   const [importKind, setImportKind] = useState<"assessments" | "lessons" | null>(null);
   const [dataManageOpen, setDataManageOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState("");
   const [keyboardShortcut, setKeyboardShortcut] = useState("⌘ K");
   const [locationSearch, setLocationSearch] = useState("");
@@ -337,9 +339,22 @@ export default function TeacherWorkbench() {
       }
 
       if (loaded.warnings.length) setToast(loaded.warnings[0]);
+      setLoaded(true);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [locationSearch]);
+
+  // 首次运行：演示数据尚未清除时，自动弹出图文首装向导。
+  useEffect(() => {
+    if (!loaded || accessMode !== "desktop" || !workspace.meta.containsDemoData) return;
+    try {
+      if (window.localStorage.getItem("tw-onboarded")) return;
+    } catch {
+      return;
+    }
+    const timer = window.setTimeout(() => setOnboardingOpen(true), 700);
+    return () => window.clearTimeout(timer);
+  }, [loaded, accessMode, workspace.meta.containsDemoData]);
 
   // Local reminders: while the desktop page is open, surface due lesson and
   // task reminders as toasts (and system notifications when permitted).
@@ -626,6 +641,32 @@ export default function TeacherWorkbench() {
     });
   }
 
+  function finishOnboarding(config: { workbenchName: string; teacherName: string; roleLabel: string; schoolStage: SchoolStage; subjects: string[]; avatarMark: string }) {
+    const now = new Date().toISOString();
+    const success = commitWorkspace(() => {
+      const newUser = {
+        ...workspace.user,
+        workbenchName: config.workbenchName,
+        teacherName: config.teacherName,
+        roleLabel: config.roleLabel,
+        schoolStage: config.schoolStage,
+        subjects: config.subjects,
+        appearance: { ...workspace.user.appearance, avatarMark: config.avatarMark },
+      };
+      return createEmptyWorkbenchData(newUser, now);
+    }, "工作台已配置好，演示数据已清空，开始导入名单与课表吧。");
+    if (success) {
+      try {
+        window.localStorage.setItem("tw-onboarded", "1");
+      } catch {
+        // 标记写入失败不影响配置完成。
+      }
+      setOnboardingOpen(false);
+      setSelectedStudentId("");
+      setActiveView("students");
+    }
+  }
+
   if (accessMode === "mobile") {
     return <MobileReadOnlyWorkbench content={mobileContent ?? createSeedWorkbenchData().mobileSnapshot!} />;
   }
@@ -641,7 +682,12 @@ export default function TeacherWorkbench() {
           </span>
         </div>
 
-        {workspace.meta.containsDemoData ? <div className="demo-chip"><span aria-hidden="true">●</span> 全部为虚构演示数据</div> : null}
+        {workspace.meta.containsDemoData ? (
+          <div className="demo-chip-block">
+            <div className="demo-chip"><span aria-hidden="true">●</span> 全部为虚构演示数据</div>
+            {!readOnly ? <button type="button" className="text-button" onClick={() => setOnboardingOpen(true)}>开始配置我的工作台 <span>→</span></button> : null}
+          </div>
+        ) : null}
 
         <nav className="main-nav">
           {navItems.map((item) => (
@@ -840,6 +886,13 @@ export default function TeacherWorkbench() {
         />
       ) : null}
       {settingsOpen ? <SettingsModal data={workspace} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /> : null}
+      {onboardingOpen ? (
+        <OnboardingWizard
+          data={workspace}
+          onClose={() => setOnboardingOpen(false)}
+          onFinish={finishOnboarding}
+        />
+      ) : null}
 
       {toast ? <div className="toast" role="status"><span aria-hidden="true">✓</span>{toast}</div> : null}
     </div>
@@ -1763,5 +1816,214 @@ function SettingsModal({ data, onClose, onSave }: { data: WorkbenchData; onClose
         <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存设置</button></div>
       </form>
     </Modal>
+  );
+}
+
+/* 首装向导的内联插图：线描风格，松柏绿主色 + 杏色点缀，与工作台视觉一致 */
+function OnboardingIllustration({ step }: { step: "welcome" | "teacher" | "subjects" | "brand" | "ready" | "done" }) {
+  const stroke = "#3d5a4a";
+  const accent = "#c8895a";
+  const soft = "#e8efe8";
+  const common = { fill: "none", stroke, strokeWidth: 1.6, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  return (
+    <svg viewBox="0 0 160 120" className="onboarding-art" aria-hidden="true">
+      <rect x="0" y="0" width="160" height="120" rx="16" fill={soft} />
+      {step === "welcome" && (
+        <g {...common}>
+          <path d="M40 86 L40 48 L80 30 L120 48 L120 86" />
+          <path d="M40 86 L120 86" />
+          <path d="M58 86 L58 62 L102 62 L102 86" />
+          <circle cx="80" cy="50" r="5" fill={accent} stroke="none" />
+          <path d="M70 86 L70 74 L90 74 L90 86" />
+        </g>
+      )}
+      {step === "teacher" && (
+        <g {...common}>
+          <circle cx="80" cy="44" r="14" />
+          <path d="M56 92 C56 74 64 66 80 66 C96 66 104 74 104 92" />
+          <path d="M44 40 L44 28 M44 40 L44 52 M44 40 L32 40 M44 40 L56 40" stroke={accent} />
+          <rect x="68" y="84" width="24" height="14" rx="3" />
+        </g>
+      )}
+      {step === "subjects" && (
+        <g {...common}>
+          <rect x="44" y="40" width="26" height="34" rx="2" />
+          <rect x="70" y="36" width="26" height="38" rx="2" fill="#fff" />
+          <rect x="96" y="42" width="26" height="32" rx="2" />
+          <path d="M76 50 L90 50 M76 58 L90 58 M76 66 L86 66" stroke={accent} />
+          <path d="M50 90 L120 90" />
+        </g>
+      )}
+      {step === "brand" && (
+        <g {...common}>
+          <circle cx="80" cy="60" r="26" />
+          <circle cx="80" cy="60" r="9" fill={accent} stroke="none" />
+          <path d="M80 34 L80 28 M80 92 L80 86 M106 60 L112 60 M48 60 L42 60" stroke={accent} />
+          <path d="M98 42 L103 37 M62 78 L57 83 M98 78 L103 83 M62 42 L57 37" />
+        </g>
+      )}
+      {step === "ready" && (
+        <g {...common}>
+          <path d="M50 64 L72 86 L112 44" stroke={accent} strokeWidth="3" />
+          <circle cx="80" cy="60" r="34" />
+        </g>
+      )}
+      {step === "done" && (
+        <g {...common}>
+          <path d="M80 30 L80 60 L100 72" />
+          <circle cx="80" cy="60" r="30" />
+          <path d="M70 60 L78 68 L92 52" stroke={accent} strokeWidth="2.5" />
+        </g>
+      )}
+    </svg>
+  );
+}
+
+const ONBOARDING_STEPS = [
+  { key: "welcome", title: "把工作台变成你自己的", subtitle: "几分钟配置，之后每天打开就能直接用。" },
+  { key: "teacher", title: "先认识一下", subtitle: "工作台名称和你的称呼，会显示在桌面与手机上。" },
+  { key: "subjects", title: "你教什么", subtitle: "学段和学科决定默认值，之后可以改。" },
+  { key: "brand", title: "选一个标记", subtitle: "一个字作为头像标记，出现在侧栏和导出文件里。" },
+  { key: "ready", title: "准备就绪", subtitle: "完成配置后，演示数据会被清空，你可以导入真实名单与课表。" },
+] as const;
+
+function OnboardingWizard({
+  data,
+  onClose,
+  onFinish,
+}: {
+  data: WorkbenchData;
+  onClose: () => void;
+  onFinish: (config: {
+    workbenchName: string;
+    teacherName: string;
+    roleLabel: string;
+    schoolStage: SchoolStage;
+    subjects: string[];
+    avatarMark: string;
+  }) => void;
+}) {
+  const [step, setStep] = useState(0);
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({
+    workbenchName: data.user.workbenchName,
+    teacherName: data.user.teacherName,
+    roleLabel: data.user.roleLabel,
+    schoolStage: data.user.schoolStage,
+    subjects: data.user.subjects.join("、"),
+    avatarMark: data.user.appearance.avatarMark,
+  });
+  const isLast = step === ONBOARDING_STEPS.length - 1;
+  const current = ONBOARDING_STEPS[step];
+
+  function update(field: keyof typeof form, value: string) {
+    setForm((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function next() {
+    setError("");
+    if (current.key === "teacher") {
+      if (!form.workbenchName.trim() || !form.teacherName.trim()) return setError("请填写工作台名称和老师称呼。");
+    }
+    if (current.key === "subjects") {
+      const subjects = form.subjects.split(/[、,，\s]+/).map((s) => s.trim()).filter(Boolean);
+      if (!subjects.length) return setError("请至少填写一个任教学科。");
+    }
+    setStep((s) => Math.min(s + 1, ONBOARDING_STEPS.length - 1));
+  }
+
+  function finish() {
+    const subjects = form.subjects.split(/[、,，\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (!subjects.length) return setError("请至少填写一个任教学科。");
+    onFinish({
+      workbenchName: form.workbenchName.trim(),
+      teacherName: form.teacherName.trim(),
+      roleLabel: form.roleLabel.trim() || `${form.schoolStage}教师`,
+      schoolStage: form.schoolStage as SchoolStage,
+      subjects,
+      avatarMark: form.avatarMark.trim() || form.workbenchName.trim().slice(0, 1) || "师",
+    });
+  }
+
+  return (
+    <div className="onboarding-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="onboarding-card" role="dialog" aria-modal="true" aria-label="首次配置向导" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="onboarding-art-panel">
+          <OnboardingIllustration step={current.key} />
+          <div className="onboarding-step-dots">
+            {ONBOARDING_STEPS.map((s, i) => (
+              <span key={s.key} className={i === step ? "active" : i < step ? "done" : ""} />
+            ))}
+          </div>
+        </div>
+        <div className="onboarding-form-panel">
+          <header className="onboarding-header">
+            <span className="onboarding-step-label">第 {step + 1} / {ONBOARDING_STEPS.length} 步</span>
+            <button type="button" className="onboarding-skip" onClick={onClose}>稍后再说</button>
+          </header>
+
+          <div className="onboarding-body">
+            <h2>{current.title}</h2>
+            <p className="onboarding-subtitle">{current.subtitle}</p>
+
+            {current.key === "welcome" ? (
+              <div className="onboarding-welcome-points">
+                <div><span>◎</span><div><strong>每天先做哪三件</strong><small>课次、事项、学生重点自动排好。</small></div></div>
+                <div><span>▦</span><div><strong>课表与备课一站看</strong><small>真实课次对应真实备课清单。</small></div></div>
+                <div><span>✓</span><div><strong>事项不再散落</strong><small>教学、学生、行政、论文一条时间线。</small></div></div>
+                <div><span>↻</span><div><strong>手机只看不改</strong><small>更新一次，手机随时查阅。</small></div></div>
+              </div>
+            ) : null}
+
+            {current.key === "teacher" ? (
+              <div className="onboarding-fields">
+                <label>工作台名称<input value={form.workbenchName} onChange={(e) => update("workbenchName", e.target.value)} placeholder="例如：林老师的工作台" /></label>
+                <label>老师称呼<input value={form.teacherName} onChange={(e) => update("teacherName", e.target.value)} placeholder="例如：林老师" /></label>
+                <label>身份说明<input value={form.roleLabel} onChange={(e) => update("roleLabel", e.target.value)} placeholder="例如：初中语文教师 · 班主任" /></label>
+              </div>
+            ) : null}
+
+            {current.key === "subjects" ? (
+              <div className="onboarding-fields">
+                <label>学段<select value={form.schoolStage} onChange={(e) => update("schoolStage", e.target.value)}><option>小学</option><option>初中</option><option>高中</option><option>教培</option></select></label>
+                <label>任教学科<input value={form.subjects} onChange={(e) => update("subjects", e.target.value)} placeholder="例如：语文、班会" /></label>
+                <p className="onboarding-hint">多个学科用顿号或逗号隔开。</p>
+              </div>
+            ) : null}
+
+            {current.key === "brand" ? (
+              <div className="onboarding-fields">
+                <label>头像标记<input value={form.avatarMark} maxLength={2} onChange={(e) => update("avatarMark", e.target.value)} placeholder="一个字" /></label>
+                <div className="onboarding-avatar-preview">
+                  <span className="teacher-avatar">{form.avatarMark.trim() || form.workbenchName.trim().slice(0, 1) || "师"}</span>
+                  <span>预览：会显示在侧栏左下角与导出文件名。</span>
+                </div>
+              </div>
+            ) : null}
+
+            {current.key === "ready" ? (
+              <div className="onboarding-ready-summary">
+                <div className="ready-row"><span>工作台</span><strong>{form.workbenchName.trim() || "—"}</strong></div>
+                <div className="ready-row"><span>老师</span><strong>{form.teacherName.trim() || "—"}</strong></div>
+                <div className="ready-row"><span>学段学科</span><strong>{form.schoolStage} · {form.subjects || "—"}</strong></div>
+                <div className="ready-row"><span>头像</span><strong>{form.avatarMark.trim() || "师"}</strong></div>
+                <p className="onboarding-hint ready-note"><span aria-hidden="true">i</span> 完成后虚构演示数据会被清空，得到一本属于你的空白工作台。当前演示版本会自动存入备份，可随时恢复。</p>
+              </div>
+            ) : null}
+
+            {error ? <p className="form-error" role="alert">{error}</p> : null}
+          </div>
+
+          <footer className="onboarding-actions">
+            {step > 0 ? <button type="button" className="button button-ghost" onClick={() => setStep((s) => s - 1)}>上一步</button> : <span />}
+            {!isLast ? (
+              <button type="button" className="button button-primary" onClick={next}>下一步</button>
+            ) : (
+              <button type="button" className="button button-primary" onClick={finish}>完成配置，清空演示数据</button>
+            )}
+          </footer>
+        </div>
+      </section>
+    </div>
   );
 }
