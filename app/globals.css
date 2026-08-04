@@ -2746,3 +2746,9 @@ kbd {
   .onboarding-art-panel { padding: 20px; }
   .onboarding-art { width: 120px; height: 90px; }
 }
+
+/* ---- 完成全部今日事项的庆祝空态 ---- */
+.celebration-card .celebration { display: grid; justify-items: center; gap: 8px; padding: 30px 20px; text-align: center; }
+.celebration-mark { display: grid; width: 56px; height: 56px; place-items: center; border-radius: 50%; background: var(--green-soft); color: var(--green); font-size: 26px; }
+.celebration h2 { margin: 4px 0 2px; font-size: 15px; letter-spacing: -.02em; }
+.celebration p { margin: 0 0 8px; color: var(--muted); font-size: 9px; line-height: 1.6; }

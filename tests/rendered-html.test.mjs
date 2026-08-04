@@ -34,7 +34,7 @@ test("server-renders the teacher workbench framework", async () => {
   assert.match(html, /查看手机内容/);
   assert.match(html, /学生看板/);
   assert.match(html, /家校协同/);
-  assert.match(html, /事项中心|收口清单/);
+  assert.match(html, /事项中心|今天先做这三件/);
   assert.match(html, /成绩、排名与近期动态/);
   assert.doesNotMatch(html, /学习证据|事实时间线/);
   assert.doesNotMatch(html, /Agent|正式数据|置信度|加密数据包|仓库令牌|档案编号|129 名学生/);

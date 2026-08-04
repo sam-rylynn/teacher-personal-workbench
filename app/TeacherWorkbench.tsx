@@ -244,6 +244,10 @@ export default function TeacherWorkbench() {
   // Demo data is anchored to its fictional date; real data follows the device.
   const displayDate = workspace.meta.containsDemoData ? "2026-09-16" : deviceToday;
   const summary = useMemo(() => summarizeWorkbench(workspace, displayDate), [workspace, displayDate]);
+  const completedToday = useMemo(
+    () => workspace.tasks.filter((task) => task.status === "已完成" && task.completedAt && task.completedAt.slice(0, 10) === displayDate).length,
+    [workspace.tasks, displayDate],
+  );
   const taskSummary = useMemo(() => summarizeTaskDuration(workspace.tasks), [workspace.tasks]);
   const selectedStudent = workspace.students.find((student) => student.id === selectedStudentId) ?? workspace.students[0];
   const selectedLesson = workspace.lessons.find((lesson) => lesson.id === selectedLessonId) ?? null;
@@ -286,7 +290,7 @@ export default function TeacherWorkbench() {
       });
     const taskResults: SearchResult[] = workspace.tasks
       .filter((task) => `${task.title}${task.category}${task.relatedLabel ?? ""}`.includes(query))
-      .map((task) => ({ type: "事项", title: task.title, meta: `${formatDateTime(task.dueAt)} · ${task.relatedLabel ?? "未关联对象"}`, id: task.id }));
+      .map((task) => ({ type: "事项", title: task.title, meta: `${formatDateTime(task.dueAt)} · ${task.relatedLabel ?? "未关联"}`, id: task.id }));
     const lessonResults: SearchResult[] = workspace.lessons
       .filter((lesson) => `${lesson.title}${lesson.className}${lesson.subject}${lesson.room}`.includes(query))
       .map((lesson) => ({ type: "课次", title: lesson.title, meta: `${lesson.className} · ${formatDateTime(lesson.startsAt)}`, id: lesson.id }));
@@ -753,6 +757,7 @@ export default function TeacherWorkbench() {
             <TodayView
               data={workspace}
               summary={summary}
+              completedToday={completedToday}
               onToggleTask={toggleTask}
               onOpenLesson={setSelectedLessonId}
               onOpenQuickAdd={() => setStudentEditorOpen(true)}
@@ -902,6 +907,7 @@ export default function TeacherWorkbench() {
 function TodayView({
   data,
   summary,
+  completedToday,
   onToggleTask,
   onOpenLesson,
   onOpenQuickAdd,
@@ -912,6 +918,7 @@ function TodayView({
 }: {
   data: WorkbenchData;
   summary: ReturnType<typeof summarizeWorkbench>;
+  completedToday: number;
   onToggleTask: (id: string) => void;
   onOpenLesson: (id: string) => void;
   onOpenQuickAdd: () => void;
@@ -931,7 +938,11 @@ function TodayView({
       <SectionHeader
         eyebrow={formatFullDate(nextLesson?.startsAt ?? data.meta.updatedAt)}
         title={`下午好，${data.user.teacherName}`}
-        description={`还有 ${summary.openTasks} 件未完成事项，先处理最临近的三件。`}
+        description={openTasks.length === 0
+          ? "今天的事都做完啦，辛苦了。"
+          : completedToday > 0
+            ? `今天已完成 ${completedToday} 件，还有 ${summary.openTasks} 件，先做最紧急的三件。`
+            : `还有 ${summary.openTasks} 件未完成事项，先做最紧急的三件。`}
         actions={!readOnly ? <button type="button" className="button button-soft" onClick={onOpenQuickAdd}><span aria-hidden="true">＋</span> 更新学生情况</button> : undefined}
       />
 
@@ -952,8 +963,18 @@ function TodayView({
           </button>
         ) : null}
 
+        {openTasks.length === 0 ? (
+          <section className="card focus-card celebration-card">
+            <div className="celebration">
+              <span className="celebration-mark" aria-hidden="true">✓</span>
+              <h2>今天的事项都处理完了</h2>
+              <p>休息一下，或者看看明天的课表。</p>
+              <button type="button" className="text-button" onClick={onGoTasks}>查看全部事项 <span>→</span></button>
+            </div>
+          </section>
+        ) : (
         <section className="card focus-card">
-          <div className="card-heading"><div><p className="eyebrow">今天最值得先做</p><h2>收口清单</h2></div><Pill tone="apricot">约 {formatMinutes(focusMinutes)}</Pill></div>
+          <div className="card-heading"><div><h2>今天先做这三件</h2></div><Pill tone="apricot">约 {formatMinutes(focusMinutes)}</Pill></div>
           <div className="focus-list">
             {focusTasks.map((task, index) => (
               <div key={task.id} className="focus-item">
@@ -964,10 +985,11 @@ function TodayView({
           </div>
           <button type="button" className="text-button wide" onClick={onGoTasks}>查看全部事项 <span>→</span></button>
         </section>
+        )}
 
         <section className="card student-priority-card">
           <div className="card-heading student-priority-heading">
-            <div><p className="eyebrow">第二板块 · 学生重点</p><h2>成绩、排名与近期动态</h2><span>按待处理问题和近期变化排序。</span></div>
+            <div><p className="eyebrow">学生重点</p><h2>成绩、排名与近期动态</h2><span>谁最需要你今天关注，排在前。</span></div>
             <button type="button" className="button button-soft" onClick={onGoStudents}>进入学生看板 →</button>
           </div>
           <div className="student-priority-table">
@@ -1001,7 +1023,7 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
       <SectionHeader
         eyebrow="本周安排"
         title="教学课表"
-        description="按真实课次查看班级、时间、地点、备课内容和课前提醒。"
+        description="点击任一课次查看备课清单与提醒。"
         actions={!readOnly ? (
           <div className="section-actions">
             <button type="button" className="button button-ghost" onClick={onExportCalendar}>导出日历 (.ics)</button>
@@ -1079,7 +1101,7 @@ function StudentsView({
       <SectionHeader
         eyebrow="成绩、变化与家校协同"
         title="学生档案"
-        description="每次测评独立记录，进退步由相邻的已核对测评自动计算。"
+        description="只看核对过的成绩，变化自动算好。"
         actions={!readOnly ? (
           <div className="section-actions">
             <button type="button" className="button button-ghost" onClick={onImportAssessments}>导入名单与测评</button>
@@ -1223,7 +1245,7 @@ function TasksView({
   return (
     <>
       <SectionHeader
-        eyebrow="所有工作回到一条时间线"
+        eyebrow="按截止时间排列"
         title="事项中心"
         description="教学、学生、行政和论文事项统一按截止时间查看。"
         actions={!readOnly ? <button type="button" className="button button-primary" onClick={onQuickAdd}>＋ 新建事项</button> : undefined}
@@ -1243,7 +1265,7 @@ function TasksView({
                   <div className="task-body">
                     <div className="task-title-line"><Pill tone={toneForTask(task.category)}>{task.category}</Pill><Pill tone={done ? "sage" : task.status === "进行中" ? "blue" : "neutral"}>{task.status}</Pill></div>
                     <h3>{task.title}</h3>
-                    <p><span>截止 {formatDateTime(task.dueAt)}</span><span>预计 {formatMinutes(task.estimatedMinutes)}</span><span>{task.relatedLabel ?? "未关联对象"}</span>{task.reminderAt ? <span>提醒 {formatDateTime(task.reminderAt)}</span> : null}</p>
+                    <p><span>截止 {formatDateTime(task.dueAt)}</span><span>预计 {formatMinutes(task.estimatedMinutes)}</span><span>{task.relatedLabel ?? "未关联"}</span>{task.reminderAt ? <span>提醒 {formatDateTime(task.reminderAt)}</span> : null}</p>
                   </div>
                 </article>
               );
@@ -1271,7 +1293,7 @@ function ResourcesView({ resources }: { resources: WorkbenchData["resources"] })
   });
   return (
     <>
-      <SectionHeader eyebrow="一次整理，持续复用" title="教学资料" description="在已经整理好的教案、课件、练习、模板和参考资料中快速查找。" />
+      <SectionHeader eyebrow="查找与复用" title="教学资料" description="搜名称、学科或班级，找到要用的那一份。" />
       <div className="resource-toolbar card"><label className="inline-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资料名称、学科或班级" /></label><div className="filter-chips">{filters.map((filter) => <button type="button" key={filter} className={kind === filter ? "active" : ""} onClick={() => setKind(filter)}>{filter}</button>)}</div></div>
       <div className="resource-grid">
         {visible.map((resource, index) => <article className="resource-card card" key={resource.id}><span className={`file-mark ${["sage", "apricot", "blue", "violet", "rose"][index % 5]}`}>{resource.kind.slice(0, 1)}</span><span><Pill tone="sage">{resource.kind}</Pill><strong>{resource.title}</strong><small>{resource.gradeOrClass} · {resource.subject}</small><small>{resource.location}</small></span></article>)}
@@ -1434,7 +1456,7 @@ function NewTaskModal({ demoMode, onClose, onSave }: { demoMode: boolean; onClos
   }
 
   return (
-    <Modal title="新建事项" subtitle="教学、学生、行政和论文任务都使用同一组时间与提醒规则。" onClose={onClose}>
+    <Modal title="新建事项" subtitle="教学、学生、行政和论文事项都使用同一组时间与提醒规则。" onClose={onClose}>
       <form className="quick-form" onSubmit={submit}>
         <label>类别<select name="category" defaultValue="教学"><option>教学</option><option>学生</option><option>行政</option><option>论文</option></select></label>
         <label>事项标题<input name="title" required placeholder="例如：核对八4阅读问题单" /></label>
@@ -1471,7 +1493,7 @@ function MobileUpdateModal({ data, complete, content, localDate, onClose, onUpda
       {!complete ? (
         <div className="publish-preview">
           <div className="snapshot-summary"><div><p className="eyebrow">本次更新内容</p><h3>老师选择过的摘要内容</h3><span>手机只用于查看，不能新增、修改或删除。</span></div><Pill tone="sage">仅供查看</Pill></div>
-          <div className="preview-columns"><div><small>学生</small><strong>{Math.min(5, data.students.length)} 名重点学生</strong><strong>最新成绩与排名</strong><strong>近期问题状态</strong></div><div><small>课表与事项</small><strong>{data.lessons.filter((lesson) => lesson.status === "待上课").length} 节待上课课次</strong><strong>{summary.openTasks} 件未完成事项</strong><strong>不包含附件原文件</strong></div></div>
+          <div className="preview-columns"><div><small>学生</small><strong>{Math.min(5, data.students.length)} 名重点学生</strong><strong>最新成绩与排名</strong><strong>近期关注状态</strong></div><div><small>课表与事项</small><strong>{data.lessons.filter((lesson) => lesson.status === "待上课").length} 节待上课课次</strong><strong>{summary.openTasks} 件未完成事项</strong><strong>不包含附件原文件</strong></div></div>
           <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="button" className="button button-primary" onClick={onUpdate}>确认更新</button></div>
         </div>
       ) : (
@@ -1513,11 +1535,11 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
       <header className="mobile-readonly-header"><span className="brand-mark">禾</span><span><strong>{content.workbenchName}</strong><small>手机查看版 · 更新于 {formatDateTime(content.generatedAt)}</small></span><Pill tone="sage">仅供查看</Pill></header>
       <label className="mobile-readonly-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、课次或事项" /></label>
       {normalized ? (
-        <section className="mobile-search-panel"><h2>搜索结果</h2>{students.map((student) => <button type="button" key={student.id} onClick={() => { setSection("students"); setQuery(""); }}><Pill tone="sage">学生</Pill><span><strong>{student.name}</strong><small>{student.className} · {student.issueTitle ?? "暂无近期问题"}</small></span></button>)}{lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => { setSection("teaching"); setQuery(""); }}><Pill tone="blue">课次</Pill><span><strong>{lesson.title}</strong><small>{lesson.className} · {formatDateTime(lesson.startsAt)}</small></span></button>)}{tasks.map((task) => <button type="button" key={task.id} onClick={() => { setSection("tasks"); setQuery(""); }}><Pill tone="apricot">事项</Pill><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)}</small></span></button>)}{!students.length && !lessons.length && !tasks.length ? <p>没有找到相关内容</p> : null}</section>
+        <section className="mobile-search-panel"><h2>搜索结果</h2>{students.map((student) => <button type="button" key={student.id} onClick={() => { setSection("students"); setQuery(""); }}><Pill tone="sage">学生</Pill><span><strong>{student.name}</strong><small>{student.className} · {student.issueTitle ?? "暂无近期关注"}</small></span></button>)}{lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => { setSection("teaching"); setQuery(""); }}><Pill tone="blue">课次</Pill><span><strong>{lesson.title}</strong><small>{lesson.className} · {formatDateTime(lesson.startsAt)}</small></span></button>)}{tasks.map((task) => <button type="button" key={task.id} onClick={() => { setSection("tasks"); setQuery(""); }}><Pill tone="apricot">事项</Pill><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)}</small></span></button>)}{!students.length && !lessons.length && !tasks.length ? <p>没有找到相关内容</p> : null}</section>
       ) : (
         <main className="mobile-readonly-content">
-          {section === "today" ? <><SectionHeader eyebrow="今日概览" title={`还有 ${content.summary.openTasks} 件事`} description={`预计需要 ${formatMinutes(content.summary.openTaskMinutes)}，手机仅供查询查看。`} /><div className="mobile-summary-grid"><div><small>重点学生</small><strong>{content.priorityStudents.length}</strong></div><div><small>待上课</small><strong>{content.upcomingLessons.length}</strong></div><div><small>近期问题</small><strong>{content.summary.issuesPending}</strong></div></div><section className="mobile-content-card"><h2>最近事项</h2>{content.openTasks.slice(0, 4).map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · {task.relatedLabel ?? "未关联"}</small></article>)}</section></> : null}
-          {section === "students" ? <><SectionHeader eyebrow="重点关注" title="学生动态" description="查看最新成绩、排名变化和近期问题。" /><section className="mobile-content-card">{content.priorityStudents.map((student) => <article key={student.id}><div className="mobile-student-title"><span className="avatar avatar-sage avatar-small">{student.name.slice(-2)}</span><span><strong>{student.name}</strong><small>{student.className}</small></span></div><div className="mobile-student-metrics"><span><small>成绩</small><strong>{student.latestScore ?? "—"}/{student.latestMaxScore ?? "—"}</strong></span><span><small>排名</small><strong>{student.currentRank ? `第${student.currentRank}` : "—"}</strong></span><span><small>变化</small><strong>{formatChange(student.rankDelta, "名")}</strong></span></div><p>{student.issueStatus ?? "暂无"} · {student.issueTitle ?? "当前没有待跟进问题"}</p></article>)}</section></> : null}
+          {section === "today" ? <><SectionHeader eyebrow="今日概览" title={`还有 ${content.summary.openTasks} 件事`} description={`预计需要 ${formatMinutes(content.summary.openTaskMinutes)}，手机仅供查询查看。`} /><div className="mobile-summary-grid"><div><small>重点学生</small><strong>{content.priorityStudents.length}</strong></div><div><small>待上课</small><strong>{content.upcomingLessons.length}</strong></div><div><small>近期关注</small><strong>{content.summary.issuesPending}</strong></div></div><section className="mobile-content-card"><h2>最近事项</h2>{content.openTasks.slice(0, 4).map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · {task.relatedLabel ?? "未关联"}</small></article>)}</section></> : null}
+          {section === "students" ? <><SectionHeader eyebrow="重点关注" title="学生动态" description="查看最新成绩、排名变化和近期关注。" /><section className="mobile-content-card">{content.priorityStudents.map((student) => <article key={student.id}><div className="mobile-student-title"><span className="avatar avatar-sage avatar-small">{student.name.slice(-2)}</span><span><strong>{student.name}</strong><small>{student.className}</small></span></div><div className="mobile-student-metrics"><span><small>成绩</small><strong>{student.latestScore ?? "—"}/{student.latestMaxScore ?? "—"}</strong></span><span><small>排名</small><strong>{student.currentRank ? `第${student.currentRank}` : "—"}</strong></span><span><small>变化</small><strong>{formatChange(student.rankDelta, "名")}</strong></span></div><p>{student.issueStatus ?? "暂无"} · {student.issueTitle ?? "当前没有需关注"}</p></article>)}</section></> : null}
           {section === "teaching" ? <><SectionHeader eyebrow="接下来" title="课表" description="查看时间、班级、地点与备课清单。" /><section className="mobile-content-card">{content.upcomingLessons.map((lesson) => <article key={lesson.id}><Pill tone="blue">{lesson.subject}</Pill><strong>{lesson.title}</strong><small>{formatDateTime(lesson.startsAt)}—{formatTime(lesson.endsAt)}</small><small>{lesson.className} · {lesson.room}</small><p>{lesson.preparation}</p></article>)}</section></> : null}
           {section === "tasks" ? <><SectionHeader eyebrow="按截止时间" title="事项" description="完成和修改请回到电脑。" /><section className="mobile-content-card">{content.openTasks.map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · 约 {formatMinutes(task.estimatedMinutes)}</small><small>{task.relatedLabel ?? "未关联"}</small></article>)}</section></> : null}
         </main>
@@ -1594,7 +1616,7 @@ function ImportModal({
           />
           <div className="modal-actions">
             <button type="button" className="button button-ghost" onClick={onClose}>取消</button>
-            <button type="button" className="button button-primary" disabled={!text.trim()} onClick={parse}>读取内容</button>
+            <button type="button" className="button button-primary" disabled={!text.trim()} onClick={parse}>解析表格</button>
           </div>
         </div>
       ) : (
@@ -1640,7 +1662,7 @@ function ImportModal({
             </div>
           ) : null}
 
-          <p className="form-note"><span aria-hidden="true">i</span> 保存后{isAssessment ? "新测评标记为“待核对”，核对后才会计入进退步" : "新课次会进入本周课表与提醒"}；重复或越界的行不会被保存。</p>
+          <p className="form-note"><span aria-hidden="true">i</span> 保存后{isAssessment ? "新测评标记为“待核对”，核对后才会计入进退步" : "新课次会进入本周课表与提醒"}；重复或超出范围的行不会被保存。</p>
           <div className="modal-actions">
             <button type="button" className="button button-ghost" onClick={() => setStep("paste")}>返回修改</button>
             <button type="button" className="button button-primary" disabled={!validCount} onClick={confirm}>确认导入 {validCount} 条</button>
@@ -1706,10 +1728,10 @@ function DataManageModal({
   }
 
   return (
-    <Modal title="数据与备份" subtitle="数据保存在此设备的浏览器中，建议定期导出文件留档。" onClose={onClose} wide>
+    <Modal title="数据与备份" subtitle="数据存在这台电脑上、不联网，记得导出一份留底。" onClose={onClose} wide>
       <div className="data-manage">
         <section className="data-section">
-          <div className="data-section-head"><h3>导出留档</h3><p>导出后可以拷贝到其他设备，或交给系统日历使用。</p></div>
+          <div className="data-section-head"><h3>导出备份</h3><p>导出后可以拷贝到其他设备，或交给系统日历使用。</p></div>
           <div className="data-actions-row">
             <button type="button" className="button button-soft" onClick={onExportData}>导出数据文件 (.json)</button>
             <button type="button" className="button button-ghost" onClick={onExportCalendar}>导出日历 (.ics)</button>
@@ -1802,7 +1824,7 @@ function SettingsModal({ data, onClose, onSave }: { data: WorkbenchData; onClose
   }
 
   return (
-    <Modal title="工作台设置" subtitle="这些信息只保存在此设备上，用于界面展示与导出文件。" onClose={onClose}>
+    <Modal title="工作台设置" subtitle="这些信息只存在这台电脑上，用来显示和导出。" onClose={onClose}>
       <form className="quick-form" onSubmit={submit}>
         <label>工作台名称<input name="workbenchName" required defaultValue={data.user.workbenchName} /></label>
         <div className="form-grid">
@@ -1810,7 +1832,7 @@ function SettingsModal({ data, onClose, onSave }: { data: WorkbenchData; onClose
           <label>身份说明<input name="roleLabel" defaultValue={data.user.roleLabel} placeholder="例如：初中语文教师 · 班主任" /></label>
           <label>学段<select name="schoolStage" defaultValue={data.user.schoolStage}><option>小学</option><option>初中</option><option>高中</option><option>教培</option></select></label>
           <label>任教学科<input name="subjects" required defaultValue={data.user.subjects.join("、")} placeholder="例如：语文、班会" /></label>
-          <label>形象标记<input name="avatarMark" maxLength={2} defaultValue={data.user.appearance.avatarMark} placeholder="一个字" /></label>
+          <label>头像标记<input name="avatarMark" maxLength={2} defaultValue={data.user.appearance.avatarMark} placeholder="一个字" /></label>
         </div>
         {error ? <p className="form-error" role="alert">{error}</p> : null}
         <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存设置</button></div>
