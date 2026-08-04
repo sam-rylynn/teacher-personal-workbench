@@ -1,0 +1,261 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  DESKTOP_DEVICE_LOCAL_ACCESS,
+  WORKBENCH_BACKUP_KEY,
+  applyWorkbenchUpdate,
+  createEmptyWorkbenchData,
+  createSeedWorkbenchData,
+  getDeviceLocalDate,
+  listDeviceLocalBackups,
+  rankPriorityStudents,
+  saveDeviceLocalWorkbench,
+  summarizeWorkbench,
+} from "../app/workbench-data.ts";
+import {
+  applyAssessmentImportPlan,
+  applyLessonImportPlan,
+  buildIcsCalendar,
+  computeDueReminders,
+  parseDelimitedText,
+  parseWorkbenchImportText,
+  planAssessmentImport,
+  planLessonImport,
+  serializeWorkbenchExport,
+} from "../app/workbench-transfer.ts";
+
+class MemoryStorage {
+  #items = new Map();
+  getItem(key) {
+    return this.#items.get(key) ?? null;
+  }
+  setItem(key, value) {
+    this.#items.set(key, String(value));
+  }
+  removeItem(key) {
+    this.#items.delete(key);
+  }
+}
+
+test("parseDelimitedText handles commas, tabs, quotes and CRLF", () => {
+  assert.deepEqual(parseDelimitedText("a,b\r\nc,d\n"), [["a", "b"], ["c", "d"]]);
+  assert.deepEqual(parseDelimitedText("姓名\t班级\n小明\t八1班"), [["姓名", "班级"], ["小明", "八1班"]]);
+  assert.deepEqual(parseDelimitedText('"含,逗号",b'), [["含,逗号", "b"]]);
+  assert.deepEqual(parseDelimitedText('"两行\n内容",b'), [["两行\n内容", "b"]]);
+  assert.deepEqual(parseDelimitedText(""), []);
+  assert.deepEqual(parseDelimitedText("\n\n"), []);
+});
+
+test("planAssessmentImport validates ranges, dates and duplicates", () => {
+  const data = createSeedWorkbenchData();
+  const valid = planAssessmentImport(
+    "姓名,班级,测评,日期,满分,成绩,排名,参考人数,班级均分\n王小明,八年级1班,单元三,2026-10-12,100,87,6,45,79.5",
+    data.students,
+  );
+  assert.equal(valid.issues.length, 0);
+  assert.equal(valid.entries.length, 1);
+  assert.equal(valid.entries[0].isNewStudent, true);
+  assert.equal(valid.entries[0].record.status, "待核对");
+  assert.equal(valid.newStudentCount, 1);
+
+  const outOfRange = planAssessmentImport("王小明,八1班,单元三,2026-10-12,100,187,6,45,79", []);
+  assert.equal(outOfRange.entries.length, 0);
+  assert.match(outOfRange.issues[0].message, /超出/);
+
+  const badRank = planAssessmentImport("王小明,八1班,单元三,2026-10-12,100,87,60,45,79", []);
+  assert.equal(badRank.entries.length, 0);
+  assert.match(badRank.issues[0].message, /参考人数/);
+
+  const badDate = planAssessmentImport("王小明,八1班,单元三,2026-13-40,100,87,6,45,79", []);
+  assert.equal(badDate.entries.length, 0);
+
+  const dupInFile = planAssessmentImport(
+    "王小明,八1班,单元三,2026-10-12,100,87,6,45,79\n王小明,八1班,单元三,2026-10-12,100,88,5,45,79",
+    [],
+  );
+  assert.equal(dupInFile.entries.length, 1);
+  assert.equal(dupInFile.issues.length, 1);
+
+  const dupExisting = planAssessmentImport("李明澈,八年级4班,阶段测,2026-09-15,100,90,1,43,85", data.students);
+  assert.equal(dupExisting.entries.length, 0);
+  assert.match(dupExisting.issues[0].message, /已存在/);
+});
+
+test("applyAssessmentImportPlan creates students and marks records unverified", () => {
+  const data = createSeedWorkbenchData();
+  const plan = planAssessmentImport(
+    "姓名,班级,测评,日期,满分,成绩,排名,参考人数,班级均分\n王小明,八年级1班,单元三,2026-10-12,100,87,6,45,79.5\n李小红,八年级1班,单元三,2026-10-12,100,91,3,45,79.5\n李明澈,八年级4班,单元三,2026-10-12,100,90,2,43,82",
+    data.students,
+  );
+  assert.equal(plan.issues.length, 0);
+  assert.equal(plan.newStudentCount, 2);
+
+  const now = "2026-10-12T20:00:00+08:00";
+  const updated = applyWorkbenchUpdate(
+    data,
+    DESKTOP_DEVICE_LOCAL_ACCESS,
+    (draft) => {
+      const result = applyAssessmentImportPlan(draft, plan, now);
+      assert.equal(result.addedStudents, 2);
+      assert.equal(result.addedAssessments, 3);
+    },
+    now,
+  );
+
+  assert.equal(updated.students.length, data.students.length + 2);
+  const imported = updated.students.find((student) => student.name === "王小明");
+  assert.ok(imported);
+  assert.equal(imported.assessments.length, 1);
+  assert.equal(imported.assessments[0].status, "待核对");
+  assert.equal(imported.assessments[0].source, "表格导入");
+  assert.equal(imported.recentIssue, null);
+  const existing = updated.students.find((student) => student.name === "李明澈");
+  assert.equal(existing.assessments.length, 5);
+  // Source data is untouched.
+  assert.equal(data.students.length, 8);
+});
+
+test("planLessonImport validates times and conflicts", () => {
+  const data = createSeedWorkbenchData();
+  const valid = planLessonImport(
+    "标题,学科,班级,日期,开始,结束,地点,备课,提醒分钟\n说明文阅读,语文,八年级1班,2026-10-13,08:55,09:40,教学楼 401,阅读材料,10",
+    data.lessons,
+  );
+  assert.equal(valid.issues.length, 0);
+  assert.equal(valid.entries.length, 1);
+  assert.equal(valid.entries[0].record.startsAt, "2026-10-13T08:55:00+08:00");
+  assert.equal(valid.entries[0].record.reminderMinutesBefore, 10);
+
+  const badTime = planLessonImport("说明文阅读,语文,八1班,2026-10-13,25:55,09:40,401,,", []);
+  assert.equal(badTime.entries.length, 0);
+
+  const reversed = planLessonImport("说明文阅读,语文,八1班,2026-10-13,09:55,09:40,401,,", []);
+  assert.equal(reversed.entries.length, 0);
+  assert.match(reversed.issues[0].message, /结束时间/);
+
+  const conflict = planLessonImport("班会,班会,八年级4班,2026-09-16,15:50,16:35,教室,,", data.lessons);
+  assert.equal(conflict.entries.length, 0);
+  assert.match(conflict.issues[0].message, /已有课次/);
+
+  const now = "2026-10-12T20:00:00+08:00";
+  const updated = applyWorkbenchUpdate(
+    data,
+    DESKTOP_DEVICE_LOCAL_ACCESS,
+    (draft) => {
+      assert.equal(applyLessonImportPlan(draft, valid, now), 1);
+    },
+    now,
+  );
+  assert.equal(updated.lessons.length, data.lessons.length + 1);
+});
+
+test("export file round-trips through parseWorkbenchImportText", () => {
+  const data = createSeedWorkbenchData();
+  const now = "2026-10-12T20:00:00+08:00";
+  const serialized = serializeWorkbenchExport(data, now);
+  const restored = parseWorkbenchImportText(serialized, now);
+  assert.equal(restored.data.students.length, data.students.length);
+  assert.equal(restored.data.tasks.length, data.tasks.length);
+  assert.equal(restored.data.meta.containsDemoData, true);
+  assert.throws(() => parseWorkbenchImportText("not json", now), /JSON/);
+});
+
+test("every save rotates the previous version into rolling backups", () => {
+  const storage = new MemoryStorage();
+  const access = DESKTOP_DEVICE_LOCAL_ACCESS;
+  const base = createSeedWorkbenchData();
+
+  const times = ["2026-10-01T10:00:00+08:00", "2026-10-02T10:00:00+08:00", "2026-10-03T10:00:00+08:00", "2026-10-04T10:00:00+08:00"];
+  let current = base;
+  for (const now of times) {
+    current = applyWorkbenchUpdate(current, access, (draft) => {
+      draft.tasks[0].title = `修改于 ${now}`;
+    }, now);
+    const saved = saveDeviceLocalWorkbench(current, { access, storage, savedAt: now });
+    assert.equal(saved.ok, true);
+  }
+
+  const backups = listDeviceLocalBackups(storage);
+  assert.equal(backups.length, 3, "keeps at most three rolling backups");
+  assert.equal(backups[0].revision, current.meta.revision - 1);
+  assert.ok(backups[0].savedAt > backups[1].savedAt);
+  assert.ok(storage.getItem(WORKBENCH_BACKUP_KEY));
+  // Backup payload restores to valid data.
+  const parsed = JSON.parse(backups[0].payload);
+  assert.equal(parsed.storageKind, "device-local");
+});
+
+test("ICS calendar contains lessons, open tasks and reminder alarms", () => {
+  const data = createSeedWorkbenchData();
+  const ics = buildIcsCalendar(data, "2026-10-12T20:00:00+08:00");
+  assert.match(ics, /BEGIN:VCALENDAR/);
+  assert.match(ics, /END:VCALENDAR/);
+  const eventCount = (ics.match(/BEGIN:VEVENT/g) ?? []).length;
+  const expected = data.lessons.length + data.tasks.filter((task) => task.status !== "已完成").length;
+  assert.equal(eventCount, expected);
+  assert.match(ics, /TRIGGER:-PT10M/);
+  assert.match(ics, /SUMMARY:八年级4班 班会｜班会：运动会岗位确认/);
+  // Completed tasks never appear.
+  assert.ok(!ics.includes("提交教研组周计划"));
+  assert.ok(ics.split("\r\n").every((line) => line.length <= 75));
+});
+
+test("computeDueReminders fires inside the reminder window only once", () => {
+  const data = createSeedWorkbenchData();
+  // Lesson L-20260916-03 starts 15:50 with a 15-minute reminder.
+  const before = computeDueReminders(data, "2026-09-16T15:34:00+08:00", new Set());
+  assert.equal(before.length, 0);
+  const inside = computeDueReminders(data, "2026-09-16T15:36:00+08:00", new Set());
+  assert.equal(inside.length, 1);
+  assert.equal(inside[0].kind, "课次");
+  const delivered = new Set(inside.map((reminder) => reminder.key));
+  assert.equal(computeDueReminders(data, "2026-09-16T15:37:00+08:00", delivered).length, 0);
+  const after = computeDueReminders(data, "2026-09-16T15:51:00+08:00", new Set());
+  assert.equal(after.length, 0);
+
+  // Task T001 reminds at 14:50 with a 15:20 due time; completed tasks never fire.
+  const taskDue = computeDueReminders(data, "2026-09-16T14:55:00+08:00", new Set());
+  assert.ok(taskDue.some((reminder) => reminder.kind === "事项" && reminder.title.includes("岗位表")));
+  const done = applyWorkbenchUpdate(data, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    const task = draft.tasks.find((candidate) => candidate.id === "T001");
+    task.status = "已完成";
+  }, "2026-09-16T14:56:00+08:00");
+  assert.ok(!computeDueReminders(done, "2026-09-16T14:57:00+08:00", new Set()).some((reminder) => reminder.title.includes("岗位表")));
+});
+
+test("device local date and empty workspace support real-data onboarding", () => {
+  assert.equal(getDeviceLocalDate("2026-10-12T15:30:00+08:00", "Asia/Shanghai"), "2026-10-12");
+  assert.match(getDeviceLocalDate(new Date(), "Asia/Shanghai"), /^\d{4}-\d{2}-\d{2}$/);
+
+  const seed = createSeedWorkbenchData();
+  const empty = createEmptyWorkbenchData(seed.user, "2026-10-12T20:00:00+08:00");
+  assert.equal(empty.meta.containsDemoData, false);
+  assert.equal(empty.students.length, 0);
+  assert.equal(empty.user.teacherName, seed.user.teacherName);
+  const summary = summarizeWorkbench(empty, "2026-10-12");
+  assert.equal(summary.totalStudents, 0);
+  assert.equal(summary.openTasks, 0);
+});
+
+test("priority ranking and summaries stay fast at real-world scale", () => {
+  const data = createSeedWorkbenchData();
+  const rows = [];
+  for (let index = 0; index < 96; index += 1) {
+    rows.push(`学生${String(index + 1).padStart(3, "0")},八年级${(index % 6) + 1}班,阶段测,2026-10-12,100,${55 + (index % 45)},${(index % 45) + 1},45,78`);
+  }
+  const plan = planAssessmentImport(rows.join("\n"), data.students);
+  assert.equal(plan.issues.length, 0);
+  const updated = applyWorkbenchUpdate(data, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    applyAssessmentImportPlan(draft, plan, "2026-10-12T20:00:00+08:00");
+  }, "2026-10-12T20:00:00+08:00");
+  assert.equal(updated.students.length, 104);
+
+  const started = performance.now();
+  const priorities = rankPriorityStudents(updated.students);
+  const summary = summarizeWorkbench(updated, "2026-10-12");
+  const elapsed = performance.now() - started;
+  assert.equal(priorities.length, 104);
+  assert.equal(summary.totalStudents, 104);
+  assert.ok(elapsed < 500, `summary of 104 students should be fast, took ${elapsed}ms`);
+});
