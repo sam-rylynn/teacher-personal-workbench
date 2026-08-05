@@ -1043,11 +1043,18 @@ function TodayView({
   const focusMinutes = focusTasks.reduce((total, task) => total + task.estimatedMinutes, 0);
   const priorityStudents = rankPriorityStudents(data.students).slice(0, 4);
   const nextLesson = lessons.filter((lesson) => lesson.status === "待上课").slice().sort((a, b) => a.startsAt.localeCompare(b.startsAt))[0];
+  const semesterWeek = useMemo(() => {
+    const templates = data.lessonTemplates ?? [];
+    if (!templates.length) return null;
+    const startDate = templates.reduce((earliest, template) => template.semesterStart < earliest ? template.semesterStart : earliest, templates[0].semesterStart);
+    const diffWeeks = Math.floor((new Date(`${data.meta.updatedAt.slice(0, 10)}T12:00:00+08:00`).getTime() - new Date(`${startDate}T12:00:00+08:00`).getTime()) / (86400000 * 7)) + 1;
+    return diffWeeks > 0 ? `第 ${diffWeeks} 周` : null;
+  }, [data.lessonTemplates, data.meta.updatedAt]);
 
   return (
     <>
       <SectionHeader
-        eyebrow={formatFullDate(nextLesson?.startsAt ?? data.meta.updatedAt)}
+        eyebrow={`${formatFullDate(nextLesson?.startsAt ?? data.meta.updatedAt)}${semesterWeek ? ` · ${semesterWeek}` : ""}`}
         title={`下午好，${data.user.teacherName}`}
         description={openTasks.length === 0
           ? "今天的事都做完啦，辛苦了。"
@@ -1279,7 +1286,7 @@ function StudentsView({
             {filteredStudents.map((student) => {
               const change = getAssessmentChange(student);
               return (
-                <button type="button" key={student.id} className={selectedStudent.id === student.id ? "active" : ""} onClick={() => onSelect(student.id)}>
+                <button type="button" key={student.id} className={selectedStudent.id === student.id ? "active" : ""} onClick={() => { onSelect(student.id); onOpenDetail(student.id); }}>
                   <Avatar student={student} size="small" />
                   <span><strong>{student.name}</strong><small>{student.className} · {change.latest ? `${change.latest.score}分` : "暂无成绩"}</small></span>
                   <span className={`list-rank-change ${(change.rankDelta ?? 0) >= 0 ? "up" : "down"}`}><strong>{change.latest ? `第${change.latest.rank}` : "—"}</strong><small>{formatChange(change.rankDelta, "")}</small></span>
@@ -1462,6 +1469,11 @@ function ResourcesView({ resources }: { resources: WorkbenchData["resources"] })
 }
 
 function Modal({ title, subtitle, onClose, children, wide = false }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  useEffect(() => {
+    function handleKey(event: KeyboardEvent) { if (event.key === "Escape") onClose(); }
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [onClose]);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section className={`modal-card ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
@@ -1833,7 +1845,7 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
   const lessons = content.upcomingLessons.filter((lesson) => `${lesson.title}${lesson.className}${lesson.subject}${lesson.room}`.includes(normalized));
   const tasks = content.openTasks.filter((task) => `${task.title}${task.category}${task.relatedLabel ?? ""}`.includes(normalized));
   return (
-    <div className="mobile-readonly-workbench">
+    <div className="mobile-readonly-workbench" data-accent={content.accent}>
       <header className="mobile-readonly-header"><span className="brand-mark">{content.workbenchName.slice(0, 1)}</span><span><strong>{content.workbenchName}</strong><small>手机查看版 · 更新于 {formatDateTime(content.generatedAt)}</small></span><Pill tone="sage">仅供查看</Pill></header>
       <label className="mobile-readonly-search"><NavIcon name="search" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、课次或事项" /></label>
       {normalized ? (
@@ -2470,7 +2482,10 @@ function StudentDetailView({
   onParentCommunication: (value: 1 | 2 | 3 | 4 | 5) => void;
   onParentSupport: (value: 1 | 2 | 3 | 4 | 5) => void;
 }) {
-  const [subject, setSubject] = useState("全部");
+  const [subject, setSubject] = useState(() => {
+    const list = getSubjectBreakdown(student);
+    return list.length ? list[0].subject : "全部";
+  });
   const subjects = getSubjectBreakdown(student);
   const subjectNames = ["全部", ...subjects.map((item) => item.subject)];
   const points = getScoreRateSeries(student, subject === "全部" ? undefined : subject);
@@ -2581,9 +2596,4 @@ function NavIcon({ name, className }: { name: "today" | "students" | "teaching" 
       {name === "search" && <><circle cx="7.8" cy="7.8" r="4.8" /><path d="M11.5 11.5 L16 16" /></>}
     </svg>
   );
-}
-
-/* 38px 版本用于课表空状态等大图标位置 */
-function LargeIcon({ name }: { name: "teaching" }) {
-  return <NavIcon name={name} className="icon-large" />;
 }

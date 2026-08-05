@@ -175,6 +175,7 @@ export interface MobileReadOnlySnapshot {
   generatedAt: string;
   sourceRevision: number;
   workbenchName: string;
+  accent: "松柏绿" | "黛蓝" | "暖橙";
   summary: WorkbenchSummary;
   priorityStudents: MobileStudentSummary[];
   upcomingLessons: LessonSession[];
@@ -1215,6 +1216,7 @@ export function createMobileReadOnlySnapshot(
     generatedAt,
     sourceRevision: data.meta.revision,
     workbenchName: data.user.workbenchName,
+    accent: data.user.appearance.accent,
     summary: summarizeWorkbench(data, localDate),
     priorityStudents,
     upcomingLessons: expandLessonsForRange(data, localDate, addDaysLocal(localDate, 14), generatedAt)
