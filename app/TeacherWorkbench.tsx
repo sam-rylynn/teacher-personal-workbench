@@ -103,12 +103,12 @@ type NewTaskInput = {
   reminderAt: string | null;
 };
 
-const navItems: Array<{ key: ViewKey; label: string; icon: string }> = [
-  { key: "today", label: "今日", icon: "⌂" },
-  { key: "students", label: "学生", icon: "◎" },
-  { key: "teaching", label: "课表", icon: "▦" },
-  { key: "tasks", label: "事项", icon: "✓" },
-  { key: "resources", label: "资料", icon: "◇" },
+const navItems = [
+  { key: "today" as const, label: "今日", icon: "today" as const },
+  { key: "students" as const, label: "学生", icon: "students" as const },
+  { key: "teaching" as const, label: "课表", icon: "teaching" as const },
+  { key: "tasks" as const, label: "事项", icon: "tasks" as const },
+  { key: "resources" as const, label: "资料", icon: "resources" as const },
 ];
 
 const weekdayLabels = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -784,7 +784,7 @@ export default function TeacherWorkbench() {
               onClick={() => setActiveView(item.key)}
               aria-current={activeView === item.key ? "page" : undefined}
             >
-              <span className="nav-icon" aria-hidden="true">{item.icon}</span>
+              <NavIcon name={item.icon} className="nav-icon" />
               <span>{item.label}</span>
               {item.key === "tasks" ? <span className="nav-count">{summary.openTasks}</span> : null}
             </button>
@@ -816,7 +816,7 @@ export default function TeacherWorkbench() {
 
           <div className="search-wrap">
             <button type="button" className="global-search" onClick={() => setSearchOpen(true)} aria-label="打开全局搜索">
-              <span aria-hidden="true">⌕</span>
+              <NavIcon name="search" aria-hidden="true" />
               <span>搜索学生、课次、事项和资料</span>
               <kbd>{keyboardShortcut}</kbd>
             </button>
@@ -910,7 +910,7 @@ export default function TeacherWorkbench() {
       <nav className="mobile-bottom-nav" aria-label="手机导航">
         {navItems.map((item) => (
           <button key={item.key} type="button" className={activeView === item.key ? "active" : ""} onClick={() => setActiveView(item.key)}>
-            <span aria-hidden="true">{item.icon}</span><small>{item.label}</small>
+            <NavIcon name={item.icon} /><small>{item.label}</small>
           </button>
         ))}
       </nav>
@@ -919,7 +919,7 @@ export default function TeacherWorkbench() {
         <div className="modal-backdrop modal-top" role="presentation" onMouseDown={() => setSearchOpen(false)}>
           <section className="search-dialog" role="dialog" aria-modal="true" aria-label="全局搜索" onMouseDown={(event) => event.stopPropagation()}>
             <div className="search-input-row">
-              <span aria-hidden="true">⌕</span>
+              <NavIcon name="search" aria-hidden="true" />
               <input autoFocus value={globalQuery} onChange={(event) => setGlobalQuery(event.target.value)} placeholder="输入姓名、班级、事项或资料名称" aria-label="搜索关键词" />
               <button type="button" onClick={() => setSearchOpen(false)}>关闭</button>
             </div>
@@ -1004,7 +1004,7 @@ export default function TeacherWorkbench() {
         />
       ) : null}
 
-      {toast ? <div className="toast" role="status"><span aria-hidden="true">✓</span>{toast}</div> : null}
+      {toast ? <div className="toast" role="status"><NavIcon name="tasks" />{toast}</div> : null}
     </div>
   );
 }
@@ -1175,7 +1175,7 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
         <div className="schedule-toolbar"><div><span className="date-button static-control">{weekLabel}</span></div><Pill tone="sage">周课表</Pill></div>
         {weekLessons.length === 0 ? (
           <div className="upload-zone schedule-empty-state">
-            <span className="upload-mark">▦</span>
+            <NavIcon name="teaching" className="upload-mark" style={{width:38,height:38}} />
             <h3>本周还没有课次</h3>
             <p>导入课表或新增重复课次后，这里会按周自动排好。</p>
             {!readOnly ? (
@@ -1269,7 +1269,7 @@ function StudentsView({
       <div className="students-layout">
         <section className="card student-list-card">
           <div className="list-controls">
-            <label className="inline-search"><span aria-hidden="true">⌕</span><input value={studentQuery} onChange={(event) => onQuery(event.target.value)} placeholder="搜索姓名或近期问题" /></label>
+            <label className="inline-search"><NavIcon name="search" aria-hidden="true" /><input value={studentQuery} onChange={(event) => onQuery(event.target.value)} placeholder="搜索姓名或近期问题" /></label>
             <select value={studentClass} onChange={(event) => onClass(event.target.value)} aria-label="筛选班级">
               <option>全部班级</option>
               {classes.sort().map((className) => <option key={className}>{className}</option>)}
@@ -1293,7 +1293,7 @@ function StudentsView({
         {!selectedStudent ? (
           <section className="card student-detail-card student-empty-state">
             <div className="upload-zone">
-              <span className="upload-mark">◎</span>
+              <NavIcon name="students" className="upload-mark" />
               <h3>{filteredStudents.length === 0 && studentQuery ? "没有符合条件的学生" : "还没有学生档案"}</h3>
               <p>{filteredStudents.length === 0 && studentQuery ? "换个关键词或班级再试。" : "从表格中粘贴名单与测评记录，核对无误后开始建立真实学生档案。"}</p>
               {!readOnly && !(filteredStudents.length === 0 && studentQuery) ? <button type="button" className="button button-primary" onClick={onImportAssessments}>导入名单与测评</button> : null}
@@ -1452,7 +1452,7 @@ function ResourcesView({ resources }: { resources: WorkbenchData["resources"] })
   return (
     <>
       <SectionHeader eyebrow="查找与复用" title="教学资料" description="搜名称、学科或班级，找到要用的那一份。" />
-      <div className="resource-toolbar card"><label className="inline-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资料名称、学科或班级" /></label><div className="filter-chips">{filters.map((filter) => <button type="button" key={filter} className={kind === filter ? "active" : ""} onClick={() => setKind(filter)}>{filter}</button>)}</div></div>
+      <div className="resource-toolbar card"><label className="inline-search"><NavIcon name="search" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资料名称、学科或班级" /></label><div className="filter-chips">{filters.map((filter) => <button type="button" key={filter} className={kind === filter ? "active" : ""} onClick={() => setKind(filter)}>{filter}</button>)}</div></div>
       <div className="resource-grid">
         {visible.map((resource, index) => <article className="resource-card card" key={resource.id}><span className={`file-mark ${["sage", "apricot", "blue", "violet", "rose"][index % 5]}`}>{resource.kind.slice(0, 1)}</span><span><Pill tone="sage">{resource.kind}</Pill><strong>{resource.title}</strong><small>{resource.gradeOrClass} · {resource.subject}</small><small>{resource.location}</small></span></article>)}
         {!visible.length ? <div className="empty-list card">{resources.length === 0 ? "还没有资料记录。" : "没有找到符合条件的资料，换个关键词或类别再试。"}</div> : null}
@@ -1835,7 +1835,7 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
   return (
     <div className="mobile-readonly-workbench">
       <header className="mobile-readonly-header"><span className="brand-mark">{content.workbenchName.slice(0, 1)}</span><span><strong>{content.workbenchName}</strong><small>手机查看版 · 更新于 {formatDateTime(content.generatedAt)}</small></span><Pill tone="sage">仅供查看</Pill></header>
-      <label className="mobile-readonly-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、课次或事项" /></label>
+      <label className="mobile-readonly-search"><NavIcon name="search" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、课次或事项" /></label>
       {normalized ? (
         <section className="mobile-search-panel"><h2>搜索结果</h2>{students.map((student) => <button type="button" key={student.id} onClick={() => { setSection("students"); setQuery(""); }}><Pill tone="sage">学生</Pill><span><strong>{student.name}</strong><small>{student.className} · {student.issueTitle ?? "暂无近期关注"}</small></span></button>)}{lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => { setSection("teaching"); setQuery(""); }}><Pill tone="blue">课次</Pill><span><strong>{lesson.title}</strong><small>{lesson.className} · {formatDateTime(lesson.startsAt)}</small></span></button>)}{tasks.map((task) => <button type="button" key={task.id} onClick={() => { setSection("tasks"); setQuery(""); }}><Pill tone="apricot">事项</Pill><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)}</small></span></button>)}{!students.length && !lessons.length && !tasks.length ? <p>没有找到相关内容</p> : null}</section>
       ) : (
@@ -1866,7 +1866,7 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
           ) : null}
         </main>
       )}
-      <nav className="mobile-readonly-nav" aria-label="手机查看导航"><button type="button" className={section === "today" ? "active" : ""} onClick={() => setSection("today")}><span>⌂</span><small>今日</small></button><button type="button" className={section === "students" ? "active" : ""} onClick={() => setSection("students")}><span>◎</span><small>学生</small></button><button type="button" className={section === "teaching" ? "active" : ""} onClick={() => setSection("teaching")}><span>▦</span><small>课表</small></button><button type="button" className={section === "tasks" ? "active" : ""} onClick={() => setSection("tasks")}><span>✓</span><small>事项</small></button><button type="button" className={section === "capture" ? "active" : ""} onClick={() => setSection("capture")}><span>✎</span><small>速记</small></button></nav>
+      <nav className="mobile-readonly-nav" aria-label="手机查看导航"><button type="button" className={section === "today" ? "active" : ""} onClick={() => setSection("today")}><NavIcon name="today" /><small>今日</small></button><button type="button" className={section === "students" ? "active" : ""} onClick={() => setSection("students")}><NavIcon name="students" /><small>学生</small></button><button type="button" className={section === "teaching" ? "active" : ""} onClick={() => setSection("teaching")}><NavIcon name="teaching" /><small>课表</small></button><button type="button" className={section === "tasks" ? "active" : ""} onClick={() => setSection("tasks")}><NavIcon name="tasks" /><small>事项</small></button><button type="button" className={section === "capture" ? "active" : ""} onClick={() => setSection("capture")}><NavIcon name="capture" /><small>速记</small></button></nav>
     </div>
   );
 }
@@ -1944,7 +1944,7 @@ function ImportModal({
       ) : (
         <div className="import-review">
           <div className="review-banner">
-            <span>✓</span>
+            <NavIcon name="tasks" />
             <div>
               <strong>识别到 {validCount} 条可导入记录{assessmentPlan?.newStudentCount ? `，其中 ${assessmentPlan.newStudentCount} 名新学生` : ""}</strong>
               <small>{issues.length ? `另有 ${issues.length} 行需要修正后才能导入` : "所有行都通过了检查"}</small>
@@ -2211,19 +2211,16 @@ function SettingsModal({ data, onClose, onSave, onAccent }: { data: WorkbenchDat
 
 /* 首装向导的内联插图：线描风格，松柏绿主色 + 杏色点缀，与工作台视觉一致 */
 function OnboardingIllustration({ step }: { step: "welcome" | "teacher" | "subjects" | "brand" | "ready" | "done" }) {
-  const stroke = "#3d5a4a";
-  const accent = "#c8895a";
-  const soft = "#e8efe8";
-  const common = { fill: "none", stroke, strokeWidth: 1.6, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  const common = { fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   return (
     <svg viewBox="0 0 160 120" className="onboarding-art" aria-hidden="true">
-      <rect x="0" y="0" width="160" height="120" rx="16" fill={soft} />
+      <rect x="0" y="0" width="160" height="120" rx="16" fill="var(--green-soft)" />
       {step === "welcome" && (
         <g {...common}>
           <path d="M40 86 L40 48 L80 30 L120 48 L120 86" />
           <path d="M40 86 L120 86" />
           <path d="M58 86 L58 62 L102 62 L102 86" />
-          <circle cx="80" cy="50" r="5" fill={accent} stroke="none" />
+          <circle cx="80" cy="50" r="5" fill="var(--apricot)" stroke="none" />
           <path d="M70 86 L70 74 L90 74 L90 86" />
         </g>
       )}
@@ -2231,7 +2228,7 @@ function OnboardingIllustration({ step }: { step: "welcome" | "teacher" | "subje
         <g {...common}>
           <circle cx="80" cy="44" r="14" />
           <path d="M56 92 C56 74 64 66 80 66 C96 66 104 74 104 92" />
-          <path d="M44 40 L44 28 M44 40 L44 52 M44 40 L32 40 M44 40 L56 40" stroke={accent} />
+          <path d="M44 40 L44 28 M44 40 L44 52 M44 40 L32 40 M44 40 L56 40" stroke="var(--apricot)" />
           <rect x="68" y="84" width="24" height="14" rx="3" />
         </g>
       )}
@@ -2240,21 +2237,21 @@ function OnboardingIllustration({ step }: { step: "welcome" | "teacher" | "subje
           <rect x="44" y="40" width="26" height="34" rx="2" />
           <rect x="70" y="36" width="26" height="38" rx="2" fill="#fff" />
           <rect x="96" y="42" width="26" height="32" rx="2" />
-          <path d="M76 50 L90 50 M76 58 L90 58 M76 66 L86 66" stroke={accent} />
+          <path d="M76 50 L90 50 M76 58 L90 58 M76 66 L86 66" stroke="var(--apricot)" />
           <path d="M50 90 L120 90" />
         </g>
       )}
       {step === "brand" && (
         <g {...common}>
           <circle cx="80" cy="60" r="26" />
-          <circle cx="80" cy="60" r="9" fill={accent} stroke="none" />
-          <path d="M80 34 L80 28 M80 92 L80 86 M106 60 L112 60 M48 60 L42 60" stroke={accent} />
+          <circle cx="80" cy="60" r="9" fill="var(--apricot)" stroke="none" />
+          <path d="M80 34 L80 28 M80 92 L80 86 M106 60 L112 60 M48 60 L42 60" stroke="var(--apricot)" />
           <path d="M98 42 L103 37 M62 78 L57 83 M98 78 L103 83 M62 42 L57 37" />
         </g>
       )}
       {step === "ready" && (
         <g {...common}>
-          <path d="M50 64 L72 86 L112 44" stroke={accent} strokeWidth="3" />
+          <path d="M50 64 L72 86 L112 44" stroke="var(--apricot)" strokeWidth="3" />
           <circle cx="80" cy="60" r="34" />
         </g>
       )}
@@ -2262,7 +2259,7 @@ function OnboardingIllustration({ step }: { step: "welcome" | "teacher" | "subje
         <g {...common}>
           <path d="M80 30 L80 60 L100 72" />
           <circle cx="80" cy="60" r="30" />
-          <path d="M70 60 L78 68 L92 52" stroke={accent} strokeWidth="2.5" />
+          <path d="M70 60 L78 68 L92 52" stroke="var(--apricot)" strokeWidth="2.5" />
         </g>
       )}
     </svg>
@@ -2358,9 +2355,9 @@ function OnboardingWizard({
 
             {current.key === "welcome" ? (
               <div className="onboarding-welcome-points">
-                <div><span>◎</span><div><strong>每天先做哪三件</strong><small>课次、事项、学生重点自动排好。</small></div></div>
-                <div><span>▦</span><div><strong>课表与备课一站看</strong><small>真实课次对应真实备课清单。</small></div></div>
-                <div><span>✓</span><div><strong>事项不再散落</strong><small>教学、学生、行政、论文一条时间线。</small></div></div>
+                <div><NavIcon name="students" /><div><strong>每天先做哪三件</strong><small>课次、事项、学生重点自动排好。</small></div></div>
+                <div><NavIcon name="teaching" /><div><strong>课表与备课一站看</strong><small>真实课次对应真实备课清单。</small></div></div>
+                <div><NavIcon name="tasks" /><div><strong>事项不再散落</strong><small>教学、学生、行政、论文一条时间线。</small></div></div>
                 <div><span>↻</span><div><strong>手机只看不改</strong><small>更新一次，手机随时查阅。</small></div></div>
               </div>
             ) : null}
@@ -2569,4 +2566,24 @@ function StudentDetailView({
       </div>
     </>
   );
+}
+
+
+function NavIcon({ name, className }: { name: "today" | "students" | "teaching" | "tasks" | "resources" | "capture" | "search" }) {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      {name === "today" && <><path d="M3 10 L3 15 C3 15.6 3.4 16 4 16 L14 16 C14.6 16 15 15.6 15 15 L15 10" /><path d="M1 9 L9 2.5 L17 9" /></>}
+      {name === "students" && <><circle cx="9" cy="6.5" r="3" /><path d="M3.5 14 C3.5 11.2 5.9 10 9 10 C12.1 10 14.5 11.2 14.5 14" /></>}
+      {name === "teaching" && <><rect x="2" y="3" width="6" height="5.5" rx="1" /><rect x="10" y="3" width="6" height="5.5" rx="1" /><rect x="2" y="10" width="6" height="5.5" rx="1" /><rect x="10" y="10" width="6" height="5.5" rx="1" /></>}
+      {name === "tasks" && <path d="M4.5 9 L7.5 12 L13.5 6" />}
+      {name === "resources" && <path d="M9 2 L14 7 L9 12 L4 7 Z" />}
+      {name === "capture" && <><path d="M3 15 L3 5 L9 2 L15 5 L15 15 Z" /><path d="M9 7 L9 11 M7 9 L11 9" /></>}
+      {name === "search" && <><circle cx="7.8" cy="7.8" r="4.8" /><path d="M11.5 11.5 L16 16" /></>}
+    </svg>
+  );
+}
+
+/* 38px 版本用于课表空状态等大图标位置 */
+function LargeIcon({ name }: { name: "teaching" }) {
+  return <NavIcon name={name} className="icon-large" />;
 }
