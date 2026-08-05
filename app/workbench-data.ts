@@ -945,7 +945,7 @@ export function createSeedWorkbenchData(options: { includeMobileSnapshot?: boole
       containsDemoData: true,
     },
     user: {
-      workbenchName: "禾页 · 教师个人工作台",
+      workbenchName: "林老师的工作台",
       teacherName: "林老师",
       roleLabel: "初中语文教师 · 八年级4班班主任",
       schoolStage: "初中",
@@ -955,7 +955,7 @@ export function createSeedWorkbenchData(options: { includeMobileSnapshot?: boole
       weekStartsOn: 1,
       appearance: {
         accent: "松柏绿",
-        avatarMark: "禾",
+        avatarMark: "林",
       },
     },
     students: createSeedStudents(),
