@@ -2752,3 +2752,44 @@ kbd {
 .celebration-mark { display: grid; width: 56px; height: 56px; place-items: center; border-radius: 50%; background: var(--green-soft); color: var(--green); font-size: 26px; }
 .celebration h2 { margin: 4px 0 2px; font-size: 15px; letter-spacing: -.02em; }
 .celebration p { margin: 0 0 8px; color: var(--muted); font-size: 9px; line-height: 1.6; }
+
+/* ---- 品牌色实时换肤(松柏绿默认 / 黛蓝 / 暖橙) ---- */
+[data-accent="黛蓝"] {
+  --canvas: #eef1f5;
+  --green: #3f6a8c;
+  --green-deep: #26455f;
+  --green-soft: #e6edf4;
+}
+[data-accent="暖橙"] {
+  --canvas: #f5f1ec;
+  --green: #b06a38;
+  --green-deep: #6e3f1f;
+  --green-soft: #f6ece1;
+}
+
+/* 换肤选择器(设置弹窗) */
+.theme-switcher { display: flex; gap: 10px; }
+.theme-dot { display: grid; place-items: center; width: 44px; height: 44px; border: 2px solid transparent; border-radius: 13px; background: #fbfcfa; cursor: pointer; transition: border-color .15s; }
+.theme-dot i { display: block; width: 24px; height: 24px; border-radius: 50%; }
+.theme-dot[data-tone="松柏绿"] i { background: linear-gradient(135deg, #476c5c, #29483c); }
+.theme-dot[data-tone="黛蓝"] i { background: linear-gradient(135deg, #3f6a8c, #26455f); }
+.theme-dot[data-tone="暖橙"] i { background: linear-gradient(135deg, #b06a38, #6e3f1f); }
+.theme-dot.active { border-color: var(--green); }
+.theme-dot small { margin-top: 2px; color: var(--muted); font-size: 7px; }
+.theme-label { margin: 0 0 7px; color: #53605a; font-size: 9px; font-weight: 750; }
+
+/* ---- 手机速记 + 电脑导入 ---- */
+.capture-card textarea { width: 100%; min-height: 90px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; color: var(--ink); font-size: 11px; line-height: 1.6; outline: 0; resize: vertical; }
+.capture-row { display: grid; grid-template-columns: 110px 1fr; gap: 9px; margin-top: 10px; }
+.capture-row select { height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; font-size: 10px; }
+.capture-msg { margin: 8px 0 0; color: var(--green); font-size: 9px; }
+.capture-list-head { display: flex; align-items: center; justify-content: space-between; }
+.capture-list-head h2 { margin: 0; font-size: 13px; }
+.inbox-paste { width: 100%; min-height: 90px; padding: 10px 11px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; color: var(--ink); font-family: ui-monospace, Menlo, monospace; font-size: 9px; line-height: 1.6; outline: 0; resize: vertical; }
+.capture-ok { margin: 0 0 10px; color: var(--green); font-size: 9px; }
+
+/* ---- 课次例外(调课/取消) ---- */
+.lesson-exception { border-top: 1px dashed var(--line); padding-top: 12px; }
+.exception-form { padding: 0; }
+.exception-form .form-grid { margin-bottom: 10px; }
+.modal-section { margin-top: 4px; }

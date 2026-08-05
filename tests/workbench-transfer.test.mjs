@@ -6,7 +6,9 @@ import {
   WORKBENCH_BACKUP_KEY,
   applyWorkbenchUpdate,
   createEmptyWorkbenchData,
+  createMobileReadOnlySnapshot,
   createSeedWorkbenchData,
+  expandLessonsForRange,
   getDeviceLocalDate,
   listDeviceLocalBackups,
   rankPriorityStudents,
@@ -18,10 +20,13 @@ import {
   applyLessonImportPlan,
   buildIcsCalendar,
   computeDueReminders,
+  inboxToTasks,
   parseDelimitedText,
+  parseInbox,
   parseWorkbenchImportText,
   planAssessmentImport,
   planLessonImport,
+  serializeInbox,
   serializeWorkbenchExport,
 } from "../app/workbench-transfer.ts";
 
@@ -258,4 +263,78 @@ test("priority ranking and summaries stay fast at real-world scale", () => {
   assert.equal(priorities.length, 104);
   assert.equal(summary.totalStudents, 104);
   assert.ok(elapsed < 500, `summary of 104 students should be fast, took ${elapsed}ms`);
+});
+
+test("recurring lesson templates expand across the semester with exceptions", () => {
+  const empty = createEmptyWorkbenchData(createSeedWorkbenchData().user, "2026-09-01T00:00:00+08:00");
+  const withTemplate = applyWorkbenchUpdate(empty, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    draft.lessonTemplates = [{
+      id: "LT1",
+      weekday: 3, // 周三
+      startTime: "08:00",
+      endTime: "08:45",
+      title: "语文正课",
+      subject: "语文",
+      className: "八年级4班",
+      room: "教学楼 302",
+      preparation: "课件",
+      reminderMinutesBefore: 10,
+      semesterStart: "2026-09-01",
+      semesterEnd: "2026-09-30",
+    }];
+  }, "2026-09-01T00:00:00+08:00");
+
+  // 2026-09-02 是周三,2026-09-09/16/23/30 也是周三(9月共5个周三在学期内)
+  const expanded = expandLessonsForRange(withTemplate, "2026-09-01", "2026-09-30", "2026-09-01T00:00:00+08:00");
+  const wednesdays = expanded.filter((l) => l.id.startsWith("LT1@"));
+  assert.ok(wednesdays.length >= 4, "模板应在学期内每周三展开");
+  assert.ok(wednesdays.every((l) => l.className === "八年级4班"));
+
+  // 取消 2026-09-09 那一节
+  const withCancel = applyWorkbenchUpdate(withTemplate, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    draft.lessonExceptions = [{ id: "LE1", templateId: "LT1", date: "2026-09-09", action: "cancel" }];
+  }, "2026-09-01T00:00:00+08:00");
+  const afterCancel = expandLessonsForRange(withCancel, "2026-09-01", "2026-09-30", "2026-09-01T00:00:00+08:00");
+  assert.ok(!afterCancel.some((l) => l.id === "LT1@2026-09-09"), "取消的当天不应出现");
+  assert.ok(afterCancel.some((l) => l.id === "LT1@2026-09-16"), "其他周照常");
+
+  // 调课:2026-09-16 改到 14:00 另一教室
+  const withMove = applyWorkbenchUpdate(withTemplate, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    draft.lessonExceptions = [{ id: "LE2", templateId: "LT1", date: "2026-09-16", action: "reschedule", newStartTime: "14:00", newEndTime: "14:45", newRoom: "录播室" }];
+  }, "2026-09-01T00:00:00+08:00");
+  const afterMove = expandLessonsForRange(withMove, "2026-09-01", "2026-09-30", "2026-09-01T00:00:00+08:00");
+  const moved = afterMove.find((l) => l.id === "LT1@2026-09-16");
+  assert.ok(moved);
+  assert.equal(moved.startsAt, "2026-09-16T14:00:00+08:00");
+  assert.equal(moved.room, "录播室");
+
+  // 当日课次汇总把模板展开算进去
+  const summary = summarizeWorkbench(withTemplate, "2026-09-02");
+  assert.equal(summary.lessonsOnDate, 1, "周三当日应有 1 节模板课");
+  const summaryOff = summarizeWorkbench(withTemplate, "2026-09-03");
+  assert.equal(summaryOff.lessonsOnDate, 0, "周四无课");
+
+  // 手机内容包含模板展开的未来课次
+  const snapshot = createMobileReadOnlySnapshot(withTemplate, "2026-09-01T07:00:00+08:00", { localDate: "2026-09-01" });
+  assert.ok(snapshot.upcomingLessons.some((l) => l.id.startsWith("LT1@")), "手机待上课应含模板展开课次");
+});
+
+test("inbox quick-capture serializes, parses and converts to pending tasks", () => {
+  const items = [
+    { id: "N-1", text: "提醒李明澈带阅读单", category: "学生", createdAt: "2026-09-16T08:00:00+08:00" },
+    { id: "N-2", text: "准备单元三课件", category: "教学", createdAt: "2026-09-16T08:05:00+08:00" },
+  ];
+  const payload = serializeInbox(items);
+  const parsed = parseInbox(payload);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].text, "提醒李明澈带阅读单");
+
+  const tasks = inboxToTasks(parsed, "2026-09-16T12:00:00+08:00");
+  assert.equal(tasks.length, 2);
+  assert.equal(tasks[0].status, "待开始");
+  assert.equal(tasks[0].relatedLabel, "手机速记");
+  assert.match(tasks[0].dueAt, /^2026-09-16T18:00/);
+
+  assert.throws(() => parseInbox("不是 json"), /速记/);
+  assert.throws(() => parseInbox("{}"), /没有识别到速记内容/);
 });

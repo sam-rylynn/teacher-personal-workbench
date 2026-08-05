@@ -10,6 +10,7 @@ import {
   createEmptyWorkbenchData,
   createMobileReadOnlySnapshot,
   createSeedWorkbenchData,
+  expandLessonsForRange,
   getAssessmentChange,
   getDeviceLocalDate,
   listDeviceLocalBackups,
@@ -20,7 +21,9 @@ import {
   summarizeWorkbench,
   type AssessmentRecord,
   type AssessmentSource,
+  type LessonException,
   type LessonSession,
+  type LessonTemplate,
   type MobileReadOnlySnapshot,
   type SchoolStage,
   type StudentIssueStatus,
@@ -31,16 +34,21 @@ import {
   type WorkbenchTask,
 } from "./workbench-data";
 import {
+  INBOX_STORAGE_KEY,
   applyAssessmentImportPlan,
   applyLessonImportPlan,
   buildIcsCalendar,
   computeDueReminders,
+  inboxToTasks,
+  parseInbox,
   parseWorkbenchImportText,
   planAssessmentImport,
   planLessonImport,
   readBackupEntry,
+  serializeInbox,
   serializeWorkbenchExport,
   type AssessmentImportPlan,
+  type InboxItem,
   type LessonImportPlan,
 } from "./workbench-transfer";
 
@@ -201,11 +209,9 @@ function addDays(dateString: string, amount: number) {
   return date.toISOString().slice(0, 10);
 }
 
-function getWeekDates(lessons: readonly LessonSession[]) {
-  const anchor = lessons.map((lesson) => lesson.startsAt.slice(0, 10)).sort()[0] ?? new Date().toISOString().slice(0, 10);
-  const anchorDate = new Date(`${anchor}T12:00:00+08:00`);
-  const day = anchorDate.getUTCDay();
-  const monday = addDays(anchor, -((day + 6) % 7));
+function getWeekDates(anchorDate: string) {
+  const day = new Date(`${anchorDate}T12:00:00+08:00`).getUTCDay();
+  const monday = addDays(anchorDate, -((day + 6) % 7));
   return Array.from({ length: 5 }, (_, index) => addDays(monday, index));
 }
 
@@ -227,6 +233,7 @@ export default function TeacherWorkbench() {
   const [publishComplete, setPublishComplete] = useState(false);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const [importKind, setImportKind] = useState<"assessments" | "lessons" | null>(null);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [dataManageOpen, setDataManageOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
@@ -250,7 +257,12 @@ export default function TeacherWorkbench() {
   );
   const taskSummary = useMemo(() => summarizeTaskDuration(workspace.tasks), [workspace.tasks]);
   const selectedStudent = workspace.students.find((student) => student.id === selectedStudentId) ?? workspace.students[0];
-  const selectedLesson = workspace.lessons.find((lesson) => lesson.id === selectedLessonId) ?? null;
+  // Effective lessons = concrete + expanded recurring templates (with exceptions).
+  const effectiveLessons = useMemo(
+    () => expandLessonsForRange(workspace, addDays(displayDate, -7), addDays(displayDate, 21), new Date().toISOString()),
+    [workspace, displayDate],
+  );
+  const selectedLesson = effectiveLessons.find((lesson) => lesson.id === selectedLessonId) ?? workspace.lessons.find((lesson) => lesson.id === selectedLessonId) ?? null;
 
   const filteredStudents = useMemo(() => {
     const query = studentQuery.trim();
@@ -606,6 +618,34 @@ export default function TeacherWorkbench() {
     return Boolean(success);
   }
 
+  function importInbox(text: string): number {
+    const now = new Date().toISOString();
+    const items = parseInbox(text);
+    const tasks = inboxToTasks(items, now, workspace.user.timeZone);
+    const success = commitWorkspace((draft) => {
+      tasks.forEach((task, index) => {
+        draft.tasks.push({ ...task, id: `T-INBOX-${Date.now()}-${index}` });
+      });
+    }, `已把 ${tasks.length} 条手机速记存为待办事项。`);
+    return success ? tasks.length : 0;
+  }
+
+  function saveLessonTemplate(input: Omit<LessonTemplate, "id">) {
+    const success = commitWorkspace((draft) => {
+      (draft.lessonTemplates ??= []).push({ ...input, id: `LT-${Date.now()}` });
+    }, "重复课次已保存，本周起自动进课表。");
+    if (success) setTemplateModalOpen(false);
+    return Boolean(success);
+  }
+
+  function addLessonException(exception: LessonException) {
+    const success = commitWorkspace((draft) => {
+      (draft.lessonExceptions ??= []).push(exception);
+    }, exception.action === "cancel" ? "本周这节课已取消。" : "本周调课已记录。");
+    if (success) setSelectedLessonId(null);
+    return Boolean(success);
+  }
+
   function clearDemoData() {
     const success = commitWorkspace(
       () => createEmptyWorkbenchData(workspace.user, new Date().toISOString()),
@@ -616,6 +656,12 @@ export default function TeacherWorkbench() {
       setSelectedStudentId("");
     }
     return Boolean(success);
+  }
+
+  function setAccent(accent: "松柏绿" | "黛蓝" | "暖橙") {
+    commitWorkspace((draft) => {
+      draft.user.appearance.accent = accent;
+    }, `已切换为${accent}。`);
   }
 
   function saveSettings(input: { workbenchName: string; teacherName: string; roleLabel: string; schoolStage: SchoolStage; subjects: string[]; avatarMark: string }) {
@@ -676,7 +722,7 @@ export default function TeacherWorkbench() {
   }
 
   return (
-    <div className={`workbench-shell ${readOnly ? "is-read-only" : ""}`}>
+    <div className={`workbench-shell ${readOnly ? "is-read-only" : ""}`} data-accent={workspace.user.appearance.accent}>
       <aside className="sidebar" aria-label="主要导航">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">{workspace.user.appearance.avatarMark}</span>
@@ -758,6 +804,7 @@ export default function TeacherWorkbench() {
               data={workspace}
               summary={summary}
               completedToday={completedToday}
+              lessons={effectiveLessons}
               onToggleTask={toggleTask}
               onOpenLesson={setSelectedLessonId}
               onOpenQuickAdd={() => setStudentEditorOpen(true)}
@@ -774,6 +821,7 @@ export default function TeacherWorkbench() {
               onOpenLesson={setSelectedLessonId}
               onImportLessons={() => setImportKind("lessons")}
               onExportCalendar={exportCalendarFile}
+              onAddTemplate={() => setTemplateModalOpen(true)}
               readOnly={readOnly}
             />
           ) : null}
@@ -856,7 +904,14 @@ export default function TeacherWorkbench() {
           onSave={saveTask}
         />
       ) : null}
-      {selectedLesson ? <LessonModal lesson={selectedLesson} onClose={() => setSelectedLessonId(null)} /> : null}
+      {selectedLesson ? <LessonModal lesson={selectedLesson} readOnly={readOnly} onClose={() => setSelectedLessonId(null)} onException={addLessonException} /> : null}
+      {templateModalOpen ? (
+        <LessonTemplateModal
+          defaultSemesterStart={displayDate}
+          onClose={() => setTemplateModalOpen(false)}
+          onSave={saveLessonTemplate}
+        />
+      ) : null}
       {publishOpen ? (
         <MobileUpdateModal
           data={workspace}
@@ -888,9 +943,10 @@ export default function TeacherWorkbench() {
           onRestoreBackup={restoreFromBackup}
           onClearDemo={clearDemoData}
           onEnableNotifications={requestNotificationPermission}
+          onImportInbox={importInbox}
         />
       ) : null}
-      {settingsOpen ? <SettingsModal data={workspace} onClose={() => setSettingsOpen(false)} onSave={saveSettings} /> : null}
+      {settingsOpen ? <SettingsModal data={workspace} onClose={() => setSettingsOpen(false)} onSave={saveSettings} onAccent={setAccent} /> : null}
       {onboardingOpen ? (
         <OnboardingWizard
           data={workspace}
@@ -908,6 +964,7 @@ function TodayView({
   data,
   summary,
   completedToday,
+  lessons,
   onToggleTask,
   onOpenLesson,
   onOpenQuickAdd,
@@ -919,6 +976,7 @@ function TodayView({
   data: WorkbenchData;
   summary: ReturnType<typeof summarizeWorkbench>;
   completedToday: number;
+  lessons: LessonSession[];
   onToggleTask: (id: string) => void;
   onOpenLesson: (id: string) => void;
   onOpenQuickAdd: () => void;
@@ -931,7 +989,7 @@ function TodayView({
   const focusTasks = openTasks.slice(0, 3);
   const focusMinutes = focusTasks.reduce((total, task) => total + task.estimatedMinutes, 0);
   const priorityStudents = rankPriorityStudents(data.students).slice(0, 4);
-  const nextLesson = data.lessons.filter((lesson) => lesson.status === "待上课").slice().sort((a, b) => a.startsAt.localeCompare(b.startsAt))[0];
+  const nextLesson = lessons.filter((lesson) => lesson.status === "待上课").slice().sort((a, b) => a.startsAt.localeCompare(b.startsAt))[0];
 
   return (
     <>
@@ -1011,11 +1069,15 @@ function TodayView({
   );
 }
 
-function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCalendar, readOnly }: { data: WorkbenchData; summary: ReturnType<typeof summarizeWorkbench>; onOpenLesson: (id: string) => void; onImportLessons: () => void; onExportCalendar: () => void; readOnly: boolean }) {
-  const weekDates = getWeekDates(data.lessons);
-  const timeRows = Array.from(new Set(data.lessons.map((lesson) => lesson.startsAt.slice(11, 16)))).sort();
-  const classCount = new Set(data.lessons.map((lesson) => lesson.className)).size;
-  const completedLessons = data.lessons.filter((lesson) => lesson.status === "已完成").length;
+function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCalendar, onAddTemplate, readOnly }: { data: WorkbenchData; summary: ReturnType<typeof summarizeWorkbench>; onOpenLesson: (id: string) => void; onImportLessons: () => void; onExportCalendar: () => void; onAddTemplate: () => void; readOnly: boolean }) {
+  const now = new Date().toISOString();
+  const today = getDeviceLocalDate(now, data.user.timeZone);
+  const anchor = data.meta.containsDemoData ? "2026-09-16" : today;
+  const weekDates = getWeekDates(anchor);
+  const weekLessons = expandLessonsForRange(data, weekDates[0], weekDates[4], now);
+  const timeRows = Array.from(new Set(weekLessons.map((lesson) => lesson.startsAt.slice(11, 16)))).sort();
+  const classCount = new Set(weekLessons.map((lesson) => lesson.className)).size;
+  const completedLessons = weekLessons.filter((lesson) => lesson.status === "已完成").length;
   const weekLabel = `${Number(weekDates[0].slice(5, 7))}月${Number(weekDates[0].slice(8, 10))}日—${Number(weekDates[4].slice(5, 7))}月${Number(weekDates[4].slice(8, 10))}日`;
 
   return (
@@ -1028,14 +1090,15 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
           <div className="section-actions">
             <button type="button" className="button button-ghost" onClick={onExportCalendar}>导出日历 (.ics)</button>
             <button type="button" className="button button-soft" onClick={onImportLessons}>＋ 导入课表</button>
+            <button type="button" className="button button-primary" onClick={onAddTemplate}>＋ 重复课次</button>
           </div>
         ) : undefined}
       />
       <div className="metric-row">
-        <div className="metric-card"><span className="metric-icon sage">课</span><p>本周课次<strong>{data.lessons.length}</strong><small>已完成 {completedLessons} 节</small></p></div>
+        <div className="metric-card"><span className="metric-icon sage">课</span><p>本周课次<strong>{weekLessons.length}</strong><small>已完成 {completedLessons} 节</small></p></div>
         <div className="metric-card"><span className="metric-icon apricot">班</span><p>任教班级<strong>{classCount}</strong><small>当前档案 {summary.totalStudents} 人</small></p></div>
         <div className="metric-card"><span className="metric-icon blue">今</span><p>当日课次<strong>{summary.lessonsOnDate}</strong><small>以课表记录为准</small></p></div>
-        <div className="metric-card"><span className="metric-icon violet">醒</span><p>已设课前提醒<strong>{data.lessons.filter((lesson) => lesson.reminderMinutesBefore !== null).length}</strong><small>打开课次查看详情</small></p></div>
+        <div className="metric-card"><span className="metric-icon violet">醒</span><p>已设课前提醒<strong>{weekLessons.filter((lesson) => lesson.reminderMinutesBefore !== null).length}</strong><small>打开课次查看详情</small></p></div>
       </div>
 
       <section className="card schedule-card">
@@ -1046,7 +1109,7 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
             <div className="schedule-row" role="row" key={time}>
               <span className="schedule-time" role="cell">{time}</span>
               {weekDates.map((date) => {
-                const lesson = data.lessons.find((item) => item.startsAt.slice(0, 10) === date && item.startsAt.slice(11, 16) === time);
+                const lesson = weekLessons.find((item) => item.startsAt.slice(0, 10) === date && item.startsAt.slice(11, 16) === time);
                 return lesson ? (
                   <button type="button" role="cell" key={`${date}-${time}`} onClick={() => onOpenLesson(lesson.id)}>
                     <strong>{lesson.className}</strong><small>{lesson.subject} · {lesson.room}</small>
@@ -1473,15 +1536,120 @@ function NewTaskModal({ demoMode, onClose, onSave }: { demoMode: boolean; onClos
   );
 }
 
-function LessonModal({ lesson, onClose }: { lesson: LessonSession; onClose: () => void }) {
+function LessonModal({ lesson, readOnly, onClose, onException }: { lesson: LessonSession; readOnly?: boolean; onClose: () => void; onException?: (exception: LessonException) => boolean }) {
+  const [rescheduleOpen, setRescheduleOpen] = useState(false);
+  const isTemplateOccurrence = lesson.id.includes("@");
+  const [templateId, occurrenceDate] = isTemplateOccurrence ? lesson.id.split("@") : ["", ""];
+  const [error, setError] = useState("");
+
+  function submitReschedule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!onException) return;
+    const form = new FormData(event.currentTarget);
+    const newDate = String(form.get("newDate") ?? "") || undefined;
+    const newStartTime = String(form.get("newStartTime") ?? "") || undefined;
+    const newEndTime = String(form.get("newEndTime") ?? "") || undefined;
+    const newRoom = String(form.get("newRoom") ?? "").trim() || undefined;
+    if (!newDate && !newStartTime && !newEndTime && !newRoom) return setError("请至少填一项要调整的内容。");
+    onException({ id: `LE-${Date.now()}`, templateId, date: occurrenceDate, action: "reschedule", newDate, newStartTime, newEndTime, newRoom });
+  }
+
   return (
     <Modal title={`${lesson.className} · ${lesson.subject}`} subtitle={`${formatFullDate(lesson.startsAt)} ${formatTime(lesson.startsAt)}—${formatTime(lesson.endsAt)} · ${lesson.room}`} onClose={onClose} wide>
       <div className="lesson-readonly-detail">
-        <div className="lesson-status-line"><Pill tone={lesson.status === "已完成" ? "sage" : "blue"}>{lesson.status}</Pill><span>{lesson.reminderMinutesBefore === null ? "未设置课前提醒" : `课前 ${lesson.reminderMinutesBefore} 分钟提醒`}</span></div>
+        <div className="lesson-status-line">
+          <Pill tone={lesson.status === "已完成" ? "sage" : "blue"}>{lesson.status}</Pill>
+          <span>{lesson.reminderMinutesBefore === null ? "未设置课前提醒" : `课前 ${lesson.reminderMinutesBefore} 分钟提醒`}</span>
+          {isTemplateOccurrence ? <Pill tone="violet">重复课次</Pill> : null}
+        </div>
         <section className="modal-section"><p className="eyebrow">本次内容</p><h3>{lesson.title}</h3></section>
         <section className="modal-section"><p className="eyebrow">备课清单</p><p>{lesson.preparation}</p></section>
+
+        {isTemplateOccurrence && !readOnly && onException ? (
+          <section className="modal-section lesson-exception">
+            <p className="eyebrow">本周调整</p>
+            {!rescheduleOpen ? (
+              <div className="data-actions-row">
+                <button type="button" className="button button-soft" onClick={() => setRescheduleOpen(true)}>本周调课</button>
+                <button type="button" className="button button-ghost" onClick={() => onException({ id: `LE-${Date.now()}`, templateId, date: occurrenceDate, action: "cancel" })}>本周取消这节课</button>
+              </div>
+            ) : (
+              <form className="quick-form exception-form" onSubmit={submitReschedule}>
+                <div className="form-grid">
+                  <label>改到日期<input name="newDate" type="date" /></label>
+                  <label>新开始<input name="newStartTime" type="time" /></label>
+                  <label>新结束<input name="newEndTime" type="time" /></label>
+                  <label>新地点<input name="newRoom" placeholder="留空则不变" /></label>
+                </div>
+                {error ? <p className="form-error" role="alert">{error}</p> : null}
+                <div className="data-actions-row">
+                  <button type="submit" className="button button-primary">保存调课</button>
+                  <button type="button" className="button button-ghost" onClick={() => setRescheduleOpen(false)}>取消</button>
+                </div>
+              </form>
+            )}
+            <p className="form-note"><span aria-hidden="true">i</span> 只影响本周这一次，后续周次照常。</p>
+          </section>
+        ) : null}
       </div>
       <div className="modal-actions"><button type="button" className="button button-primary" onClick={onClose}>关闭</button></div>
+    </Modal>
+  );
+}
+
+function LessonTemplateModal({ defaultSemesterStart, onClose, onSave }: { defaultSemesterStart: string; onClose: () => void; onSave: (input: Omit<LessonTemplate, "id">) => boolean }) {
+  const [error, setError] = useState("");
+  const defaultSemesterEnd = addDays(defaultSemesterStart, 140);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const title = String(form.get("title") ?? "").trim();
+    const subject = String(form.get("subject") ?? "").trim();
+    const className = String(form.get("className") ?? "").trim();
+    const room = String(form.get("room") ?? "").trim();
+    const startTime = String(form.get("startTime") ?? "");
+    const endTime = String(form.get("endTime") ?? "");
+    const semesterStart = String(form.get("semesterStart") ?? "");
+    const semesterEnd = String(form.get("semesterEnd") ?? "");
+    const reminderRaw = String(form.get("reminderMinutesBefore") ?? "");
+    if (!title || !subject || !className || !room) return setError("请填写标题、学科、班级和地点。");
+    if (!startTime || !endTime || endTime <= startTime) return setError("请填写有效的开始与结束时间。");
+    if (!semesterStart || !semesterEnd || semesterEnd < semesterStart) return setError("请填写有效的学期起止日期。");
+    onSave({
+      weekday: Number(form.get("weekday")),
+      startTime,
+      endTime,
+      title,
+      subject,
+      className,
+      room,
+      preparation: String(form.get("preparation") ?? "").trim() || "按教案准备",
+      reminderMinutesBefore: reminderRaw ? Math.max(1, Number.parseInt(reminderRaw, 10)) : null,
+      semesterStart,
+      semesterEnd,
+    });
+  }
+
+  return (
+    <Modal title="新增重复课次" subtitle="每周固定某天的同一时段，学期内自动进课表；临时调整用单次的调课。" onClose={onClose} wide>
+      <form className="quick-form" onSubmit={submit}>
+        <div className="form-grid">
+          <label>课次标题<input name="title" required placeholder="例如:语文正课" /></label>
+          <label>学科<input name="subject" required defaultValue="语文" /></label>
+          <label>班级<input name="className" required placeholder="例如:八年级4班" /></label>
+          <label>周几<select name="weekday" defaultValue="1"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option></select></label>
+          <label>开始时间<input name="startTime" type="time" required defaultValue="08:00" /></label>
+          <label>结束时间<input name="endTime" type="time" required defaultValue="08:45" /></label>
+          <label>地点<input name="room" required placeholder="例如:教学楼 302" /></label>
+          <label>课前提醒（分钟）<input name="reminderMinutesBefore" type="number" min="1" defaultValue="10" /></label>
+          <label>学期开始<input name="semesterStart" type="date" required defaultValue={defaultSemesterStart} /></label>
+          <label>学期结束<input name="semesterEnd" type="date" required defaultValue={defaultSemesterEnd} /></label>
+          <label className="full-field">备课清单<input name="preparation" placeholder="例如:课件、对照片段" /></label>
+        </div>
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存重复课次</button></div>
+      </form>
     </Modal>
   );
 }
@@ -1524,8 +1692,47 @@ function MobilePreview({ content, onClose }: { content: MobileReadOnlySnapshot |
 }
 
 function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot }) {
-  const [section, setSection] = useState<"today" | "students" | "teaching" | "tasks">("today");
+  const [section, setSection] = useState<"today" | "students" | "teaching" | "tasks" | "capture">("today");
   const [query, setQuery] = useState("");
+  const [inbox, setInbox] = useState<InboxItem[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(INBOX_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [captureText, setCaptureText] = useState("");
+  const [captureCategory, setCaptureCategory] = useState<TaskCategory>("学生");
+  const [captureMsg, setCaptureMsg] = useState("");
+
+  function persistInbox(items: InboxItem[]) {
+    setInbox(items);
+    try {
+      window.localStorage.setItem(INBOX_STORAGE_KEY, JSON.stringify(items));
+    } catch {
+      // 手机本地写入失败时仅内存保留。
+    }
+  }
+
+  function saveCapture() {
+    const text = captureText.trim();
+    if (!text) return;
+    const item: InboxItem = { id: `N-${Date.now()}`, text, category: captureCategory, createdAt: new Date().toISOString() };
+    persistInbox([item, ...inbox]);
+    setCaptureText("");
+    setCaptureMsg("已存到这台手机，回家在电脑一键导入。");
+    window.setTimeout(() => setCaptureMsg(""), 2500);
+  }
+
+  function copyInbox() {
+    const payload = serializeInbox(inbox);
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(payload).then(() => setCaptureMsg("已复制，回家在电脑粘贴导入。"));
+    }
+  }
   const normalized = query.trim();
   const students = content.priorityStudents.filter((student) => `${student.name}${student.className}${student.issueTitle ?? ""}`.includes(normalized));
   const lessons = content.upcomingLessons.filter((lesson) => `${lesson.title}${lesson.className}${lesson.subject}${lesson.room}`.includes(normalized));
@@ -1542,9 +1749,29 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
           {section === "students" ? <><SectionHeader eyebrow="重点关注" title="学生动态" description="查看最新成绩、排名变化和近期关注。" /><section className="mobile-content-card">{content.priorityStudents.map((student) => <article key={student.id}><div className="mobile-student-title"><span className="avatar avatar-sage avatar-small">{student.name.slice(-2)}</span><span><strong>{student.name}</strong><small>{student.className}</small></span></div><div className="mobile-student-metrics"><span><small>成绩</small><strong>{student.latestScore ?? "—"}/{student.latestMaxScore ?? "—"}</strong></span><span><small>排名</small><strong>{student.currentRank ? `第${student.currentRank}` : "—"}</strong></span><span><small>变化</small><strong>{formatChange(student.rankDelta, "名")}</strong></span></div><p>{student.issueStatus ?? "暂无"} · {student.issueTitle ?? "当前没有需关注"}</p></article>)}</section></> : null}
           {section === "teaching" ? <><SectionHeader eyebrow="接下来" title="课表" description="查看时间、班级、地点与备课清单。" /><section className="mobile-content-card">{content.upcomingLessons.map((lesson) => <article key={lesson.id}><Pill tone="blue">{lesson.subject}</Pill><strong>{lesson.title}</strong><small>{formatDateTime(lesson.startsAt)}—{formatTime(lesson.endsAt)}</small><small>{lesson.className} · {lesson.room}</small><p>{lesson.preparation}</p></article>)}</section></> : null}
           {section === "tasks" ? <><SectionHeader eyebrow="按截止时间" title="事项" description="完成和修改请回到电脑。" /><section className="mobile-content-card">{content.openTasks.map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · 约 {formatMinutes(task.estimatedMinutes)}</small><small>{task.relatedLabel ?? "未关联"}</small></article>)}</section></> : null}
+          {section === "capture" ? (
+            <>
+              <SectionHeader eyebrow="随手记" title="手机速记" description="记在这台手机上,回家在电脑一键导入为事项。" />
+              <section className="mobile-content-card capture-card">
+                <textarea value={captureText} onChange={(e) => setCaptureText(e.target.value)} placeholder="例如:明天提醒李明澈带阅读单" aria-label="速记内容" />
+                <div className="capture-row">
+                  <select value={captureCategory} onChange={(e) => setCaptureCategory(e.target.value as TaskCategory)} aria-label="速记类别"><option>学生</option><option>教学</option><option>行政</option><option>论文</option></select>
+                  <button type="button" className="button button-primary" onClick={saveCapture} disabled={!captureText.trim()}>存速记</button>
+                </div>
+                {captureMsg ? <p className="capture-msg">{captureMsg}</p> : null}
+              </section>
+              {inbox.length ? (
+                <section className="mobile-content-card">
+                  <div className="capture-list-head"><h2>已存 {inbox.length} 条</h2><button type="button" className="text-button" onClick={copyInbox}>复制速记</button></div>
+                  {inbox.map((item) => <article key={item.id}><Pill tone={toneForTask(item.category)}>{item.category}</Pill><strong>{item.text}</strong><small>{formatDateTime(item.createdAt)}</small></article>)}
+                  <button type="button" className="text-button wide" onClick={() => persistInbox([])}>清空速记</button>
+                </section>
+              ) : null}
+            </>
+          ) : null}
         </main>
       )}
-      <nav className="mobile-readonly-nav" aria-label="手机查看导航"><button type="button" className={section === "today" ? "active" : ""} onClick={() => setSection("today")}><span>⌂</span><small>今日</small></button><button type="button" className={section === "students" ? "active" : ""} onClick={() => setSection("students")}><span>◎</span><small>学生</small></button><button type="button" className={section === "teaching" ? "active" : ""} onClick={() => setSection("teaching")}><span>▦</span><small>课表</small></button><button type="button" className={section === "tasks" ? "active" : ""} onClick={() => setSection("tasks")}><span>✓</span><small>事项</small></button></nav>
+      <nav className="mobile-readonly-nav" aria-label="手机查看导航"><button type="button" className={section === "today" ? "active" : ""} onClick={() => setSection("today")}><span>⌂</span><small>今日</small></button><button type="button" className={section === "students" ? "active" : ""} onClick={() => setSection("students")}><span>◎</span><small>学生</small></button><button type="button" className={section === "teaching" ? "active" : ""} onClick={() => setSection("teaching")}><span>▦</span><small>课表</small></button><button type="button" className={section === "tasks" ? "active" : ""} onClick={() => setSection("tasks")}><span>✓</span><small>事项</small></button><button type="button" className={section === "capture" ? "active" : ""} onClick={() => setSection("capture")}><span>✎</span><small>速记</small></button></nav>
     </div>
   );
 }
@@ -1682,6 +1909,7 @@ function DataManageModal({
   onRestoreBackup,
   onClearDemo,
   onEnableNotifications,
+  onImportInbox,
 }: {
   data: WorkbenchData;
   onClose: () => void;
@@ -1691,6 +1919,7 @@ function DataManageModal({
   onRestoreBackup: (entry: WorkbenchBackupEntry) => boolean;
   onClearDemo: () => boolean;
   onEnableNotifications: () => void;
+  onImportInbox: (text: string) => number;
 }) {
   const [backups] = useState<WorkbenchBackupEntry[]>(() => {
     if (typeof window === "undefined") return [];
@@ -1703,6 +1932,22 @@ function DataManageModal({
   const [pendingFile, setPendingFile] = useState<{ name: string; text: string; students: number; lessons: number; tasks: number } | null>(null);
   const [fileError, setFileError] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [inboxText, setInboxText] = useState("");
+  const [inboxError, setInboxError] = useState("");
+  const [inboxDone, setInboxDone] = useState(0);
+
+  function importInboxNow() {
+    setInboxError("");
+    try {
+      const count = onImportInbox(inboxText);
+      if (count > 0) {
+        setInboxDone(count);
+        setInboxText("");
+      }
+    } catch (error) {
+      setInboxError(error instanceof Error ? error.message : "没有识别到速记内容。");
+    }
+  }
 
   function pickFile(event: FormEvent<HTMLInputElement>) {
     const input = event.currentTarget;
@@ -1771,6 +2016,16 @@ function DataManageModal({
         </section>
 
         <section className="data-section">
+          <div className="data-section-head"><h3>手机速记导入</h3><p>把手机上“复制速记”的内容粘贴到这里，一键存为待办事项。</p></div>
+          <textarea className="inbox-paste" value={inboxText} onChange={(e) => setInboxText(e.target.value)} placeholder="在手机上点“复制速记”，回家粘贴到这里" aria-label="粘贴手机速记" />
+          {inboxError ? <p className="form-error" role="alert">{inboxError}</p> : null}
+          {inboxDone ? <p className="capture-ok">已导入 {inboxDone} 条速记为待办事项。</p> : null}
+          <div className="data-actions-row">
+            <button type="button" className="button button-soft" disabled={!inboxText.trim()} onClick={importInboxNow}>一键导入速记</button>
+          </div>
+        </section>
+
+        <section className="data-section">
           <div className="data-section-head"><h3>提醒</h3><p>页面打开时会弹出课次与事项提醒，也可以交给系统通知。</p></div>
           <div className="data-actions-row">
             <button type="button" className="button button-soft" onClick={onEnableNotifications}>开启系统通知</button>
@@ -1801,7 +2056,7 @@ function DataManageModal({
   );
 }
 
-function SettingsModal({ data, onClose, onSave }: { data: WorkbenchData; onClose: () => void; onSave: (input: { workbenchName: string; teacherName: string; roleLabel: string; schoolStage: SchoolStage; subjects: string[]; avatarMark: string }) => boolean }) {
+function SettingsModal({ data, onClose, onSave, onAccent }: { data: WorkbenchData; onClose: () => void; onSave: (input: { workbenchName: string; teacherName: string; roleLabel: string; schoolStage: SchoolStage; subjects: string[]; avatarMark: string }) => boolean; onAccent: (accent: "松柏绿" | "黛蓝" | "暖橙") => void }) {
   const [error, setError] = useState("");
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -1827,6 +2082,24 @@ function SettingsModal({ data, onClose, onSave }: { data: WorkbenchData; onClose
     <Modal title="工作台设置" subtitle="这些信息只存在这台电脑上，用来显示和导出。" onClose={onClose}>
       <form className="quick-form" onSubmit={submit}>
         <label>工作台名称<input name="workbenchName" required defaultValue={data.user.workbenchName} /></label>
+        <div>
+          <p className="theme-label">品牌色（点击立即换肤）</p>
+          <div className="theme-switcher" role="group" aria-label="品牌色">
+            {(["松柏绿", "黛蓝", "暖橙"] as const).map((tone) => (
+              <button
+                key={tone}
+                type="button"
+                className={`theme-dot ${data.user.appearance.accent === tone ? "active" : ""}`}
+                data-tone={tone}
+                onClick={() => onAccent(tone)}
+                aria-label={`切换到${tone}`}
+              >
+                <i />
+                <small>{tone}</small>
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="form-grid">
           <label>老师称呼<input name="teacherName" required defaultValue={data.user.teacherName} /></label>
           <label>身份说明<input name="roleLabel" defaultValue={data.user.roleLabel} placeholder="例如：初中语文教师 · 班主任" /></label>

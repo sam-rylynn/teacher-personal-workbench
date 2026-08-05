@@ -87,6 +87,36 @@ export interface LessonSession {
   reminderMinutesBefore: number | null;
 }
 
+/** 学期循环课次模板：每周固定某天的同一时段。weekday 1=周一 … 7=周日。 */
+export interface LessonTemplate {
+  id: string;
+  weekday: number;
+  startTime: string;
+  endTime: string;
+  title: string;
+  subject: string;
+  className: string;
+  room: string;
+  preparation: string;
+  reminderMinutesBefore: number | null;
+  semesterStart: string;
+  semesterEnd: string;
+}
+
+/** 例外规则：某一天的模板课次被取消或调整到别的时间/地点/日期。 */
+export type LessonException =
+  | { id: string; templateId: string; date: string; action: "cancel" }
+  | {
+      id: string;
+      templateId: string;
+      date: string;
+      action: "reschedule";
+      newDate?: string;
+      newStartTime?: string;
+      newEndTime?: string;
+      newRoom?: string;
+    };
+
 export interface WorkbenchTask {
   id: string;
   category: TaskCategory;
@@ -165,6 +195,8 @@ export interface WorkbenchDataV1 {
   lessons: LessonSession[];
   tasks: WorkbenchTask[];
   resources: WorkbenchResource[];
+  lessonTemplates?: LessonTemplate[];
+  lessonExceptions?: LessonException[];
   mobileSnapshot: MobileReadOnlySnapshot | null;
 }
 
@@ -793,6 +825,8 @@ function normalizeStoredV1(data: WorkbenchDataV1): WorkbenchDataV1 {
   for (const task of normalized.tasks) {
     if (typeof task.reminderAt !== "string") task.reminderAt = null;
   }
+  if (!Array.isArray(normalized.lessonTemplates)) normalized.lessonTemplates = [];
+  if (!Array.isArray(normalized.lessonExceptions)) normalized.lessonExceptions = [];
   return normalized;
 }
 
@@ -1077,7 +1111,8 @@ export function summarizeTaskDuration(tasks: readonly WorkbenchTask[]): TaskDura
 }
 
 export function summarizeWorkbench(
-  data: Pick<WorkbenchData, "students" | "tasks" | "lessons">,
+  data: Pick<WorkbenchData, "students" | "tasks" | "lessons"> &
+    Partial<Pick<WorkbenchData, "lessonTemplates" | "lessonExceptions">>,
   localDate = SEED_LOCAL_DATE,
 ): WorkbenchSummary {
   const taskDuration = summarizeTaskDuration(data.tasks);
@@ -1107,8 +1142,8 @@ export function summarizeWorkbench(
     ).length,
     openTasks: taskDuration.openTaskCount,
     openTaskMinutes: taskDuration.openMinutes,
-    lessonsOnDate: data.lessons.filter(
-      (lesson) => lesson.startsAt.slice(0, 10) === localDate && lesson.status !== "已取消",
+    lessonsOnDate: expandLessonsOnDate(data, localDate, `${localDate}T23:59:59+08:00`).filter(
+      (lesson) => lesson.status !== "已取消",
     ).length,
     averageLatestScoreRate:
       latestRates.length === 0
@@ -1152,10 +1187,8 @@ export function createMobileReadOnlySnapshot(
     workbenchName: data.user.workbenchName,
     summary: summarizeWorkbench(data, localDate),
     priorityStudents,
-    upcomingLessons: data.lessons
+    upcomingLessons: expandLessonsForRange(data, localDate, addDaysLocal(localDate, 14), generatedAt)
       .filter((lesson) => lesson.status === "待上课" && lesson.startsAt >= generatedAt)
-      .slice()
-      .sort((left, right) => left.startsAt.localeCompare(right.startsAt))
       .slice(0, lessonLimit)
       .map(cloneSerializable),
     openTasks: data.tasks
@@ -1436,4 +1469,89 @@ export function saveDeviceLocalWorkbench(
 function roundTo(value: number, digits: number): number {
   const factor = 10 ** digits;
   return Math.round((value + Number.EPSILON) * factor) / factor;
+}
+
+/* ------------------------------------------------------------------------ */
+/* 学期循环课表展开                                                          */
+/* ------------------------------------------------------------------------ */
+
+function addDaysLocal(dateString: string, amount: number): string {
+  const date = new Date(`${dateString}T12:00:00+08:00`);
+  date.setUTCDate(date.getUTCDate() + amount);
+  return date.toISOString().slice(0, 10);
+}
+
+function weekdayOf(dateString: string): number {
+  return new Date(`${dateString}T12:00:00+08:00`).getUTCDay() || 7;
+}
+
+/**
+ * Expands recurring lesson templates into concrete sessions for the range
+ * [fromDate, toDate] (inclusive, YYYY-MM-DD), applies cancel/reschedule
+ * exceptions, and merges with manually recorded concrete lessons. Status is
+ * derived from `now`: past sessions are 已完成, future ones 待上课.
+ */
+export function expandLessonsForRange(
+  data: Pick<WorkbenchData, "lessons"> & Partial<Pick<WorkbenchData, "lessonTemplates" | "lessonExceptions">>,
+  fromDate: string,
+  toDate: string,
+  now: string,
+): LessonSession[] {
+  const templates = data.lessonTemplates ?? [];
+  const exceptions = data.lessonExceptions ?? [];
+  const result: LessonSession[] = data.lessons
+    .filter((lesson) => {
+      const date = lesson.startsAt.slice(0, 10);
+      return date >= fromDate && date <= toDate;
+    })
+    .map((lesson) => cloneSerializable(lesson));
+
+  for (let date = fromDate; date <= toDate; date = addDaysLocal(date, 1)) {
+    const weekday = weekdayOf(date);
+    for (const template of templates) {
+      if (template.weekday !== weekday) continue;
+      if (date < template.semesterStart || date > template.semesterEnd) continue;
+
+      const exception = exceptions.find((e) => e.templateId === template.id && e.date === date);
+      if (exception?.action === "cancel") continue;
+
+      let sessionDate = date;
+      let startTime = template.startTime;
+      let endTime = template.endTime;
+      let room = template.room;
+      if (exception?.action === "reschedule") {
+        sessionDate = exception.newDate ?? date;
+        startTime = exception.newStartTime ?? startTime;
+        endTime = exception.newEndTime ?? endTime;
+        room = exception.newRoom ?? room;
+      }
+      if (sessionDate < fromDate || sessionDate > toDate) continue;
+
+      const startsAt = `${sessionDate}T${startTime}:00+08:00`;
+      const endsAt = `${sessionDate}T${endTime}:00+08:00`;
+      result.push({
+        id: `${template.id}@${date}`,
+        title: template.title,
+        subject: template.subject,
+        className: template.className,
+        startsAt,
+        endsAt,
+        room,
+        preparation: template.preparation,
+        status: endsAt <= now ? "已完成" : "待上课",
+        reminderMinutesBefore: template.reminderMinutesBefore,
+      });
+    }
+  }
+
+  return result.sort((left, right) => left.startsAt.localeCompare(right.startsAt));
+}
+
+/** Effective lessons on one date (concrete + expanded templates). */
+export function expandLessonsOnDate(
+  data: Pick<WorkbenchData, "lessons"> & Partial<Pick<WorkbenchData, "lessonTemplates" | "lessonExceptions">>,
+  date: string,
+  now: string,
+): LessonSession[] {
+  return expandLessonsForRange(data, date, date, now);
 }

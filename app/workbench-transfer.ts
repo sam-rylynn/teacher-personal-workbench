@@ -10,12 +10,15 @@ import {
   WORKBENCH_SCHEMA_VERSION,
   WORKBENCH_STORAGE_KIND,
   deserializeWorkbenchData,
+  getDeviceLocalDate,
   type AssessmentRecord,
   type LessonSession,
   type StudentRecord,
+  type TaskCategory,
   type WorkbenchBackupEntry,
   type WorkbenchData,
   type WorkbenchHydrationResult,
+  type WorkbenchTask,
 } from "./workbench-data.ts";
 
 /* ------------------------------------------------------------------------ */
@@ -598,4 +601,75 @@ export function computeDueReminders(data: WorkbenchData, nowIso: string, deliver
   }
 
   return due;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Mobile quick-capture inbox (手机速记收集箱)                                */
+/* ------------------------------------------------------------------------ */
+
+export const INBOX_STORAGE_KEY = "teacher-workbench:inbox:v1" as const;
+
+export interface InboxItem {
+  id: string;
+  text: string;
+  category: TaskCategory;
+  createdAt: string;
+}
+
+const INBOX_CATEGORIES: TaskCategory[] = ["教学", "学生", "行政", "论文"];
+
+function isInboxItem(value: unknown): value is InboxItem {
+  if (typeof value !== "object" || value === null) return false;
+  const item = value as InboxItem;
+  return (
+    typeof item.id === "string" &&
+    typeof item.text === "string" &&
+    INBOX_CATEGORIES.includes(item.category) &&
+    typeof item.createdAt === "string"
+  );
+}
+
+/** Serializes phone-side quick-capture notes into a portable JSON payload. */
+export function serializeInbox(items: readonly InboxItem[]): string {
+  return JSON.stringify({ kind: "teacher-workbench-inbox", version: 1, items }, null, 2);
+}
+
+/**
+ * Parses an inbox payload pasted on the desktop. Accepts the serialized
+ * envelope or a bare array. Throws a teacher-readable message when invalid.
+ */
+export function parseInbox(text: string): InboxItem[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("内容不是有效的速记数据,请在手机上点“复制速记”后再粘贴到这里。");
+  }
+  const items = Array.isArray(parsed)
+    ? parsed
+    : (typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { items?: unknown }).items)
+        ? (parsed as { items: unknown[] }).items
+        : null);
+  if (!items) throw new Error("没有识别到速记内容。");
+  const valid = items.filter(isInboxItem);
+  if (valid.length === 0) throw new Error("没有识别到速记内容。");
+  return valid;
+}
+
+/**
+ * Converts captured notes into pending workbench tasks, due today at 18:00,
+ * so the teacher reviews them on the desktop. Notes do not touch the
+ * workspace until the teacher confirms on the PC.
+ */
+export function inboxToTasks(items: readonly InboxItem[], now: string, timeZone = "Asia/Shanghai"): Omit<WorkbenchTask, "id">[] {
+  const today = getDeviceLocalDate(now, timeZone);
+  return items.map((item) => ({
+    category: item.category,
+    title: item.text,
+    dueAt: `${today}T18:00:00+08:00`,
+    estimatedMinutes: 10,
+    status: "待开始",
+    reminderAt: null,
+    relatedLabel: "手机速记",
+  }));
 }
