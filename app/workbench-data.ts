@@ -230,6 +230,7 @@ export interface WorkbenchSummary {
 export type StudentPriorityReason =
   | "近期问题待处理"
   | "排名下降"
+  | "排名上升"
   | "成绩下降"
   | "家长沟通需跟进"
   | "家庭辅助尚未行动"
@@ -1086,6 +1087,10 @@ export function rankPriorityStudents(students: readonly StudentRecord[]): Studen
       if (progress.rankDelta !== null && progress.rankDelta < 0) {
         reasons.push("排名下降");
         priorityScore += 20 + Math.min(Math.abs(progress.rankDelta) * 2, 18);
+      }
+      if (progress.rankDelta !== null && progress.rankDelta > 0) {
+        reasons.push("排名上升");
+        priorityScore += 10 + Math.min(progress.rankDelta * 2, 12);
       }
       if (progress.scoreRateDelta !== null && progress.scoreRateDelta < 0) {
         reasons.push("成绩下降");

@@ -350,6 +350,12 @@ export default function TeacherWorkbench() {
     return [...studentResults, ...taskResults, ...lessonResults, ...resourceResults].slice(0, 8);
   }, [globalQuery, workspace]);
 
+  // Switching the main view always returns to the content top so the teacher
+  // sees the page title and summary instead of a half-scrolled position.
+  useEffect(() => {
+    window.scrollTo({ top: 0 });
+  }, [activeView]);
+
   // Track URL changes (including SPA soft navigations) so switching between
   // the desktop and mobile links always re-evaluates the access mode instead
   // of keeping the previous view.
@@ -1048,7 +1054,6 @@ function TodayView({
           : completedToday > 0
             ? `今天已完成 ${completedToday} 件，还有 ${summary.openTasks} 件，先做最紧急的三件。`
             : `还有 ${summary.openTasks} 件未完成事项，先做最紧急的三件。`}
-        actions={!readOnly ? <button type="button" className="button button-soft" onClick={onOpenQuickAdd}><span aria-hidden="true">＋</span> 更新学生情况</button> : undefined}
       />
 
       {signals.length ? (
@@ -1110,7 +1115,10 @@ function TodayView({
         <section className="card student-priority-card">
           <div className="card-heading student-priority-heading">
             <div><p className="eyebrow">学生重点</p><h2>成绩、排名与近期动态</h2><span>谁最需要你今天关注，排在前。</span></div>
-            <button type="button" className="button button-soft" onClick={onGoStudents}>进入学生看板 →</button>
+            <div className="section-actions">
+              {!readOnly ? <button type="button" className="button button-soft" onClick={onOpenQuickAdd}><span aria-hidden="true">＋</span> 更新学生情况</button> : null}
+              <button type="button" className="button button-soft" onClick={onGoStudents}>进入学生看板 →</button>
+            </div>
           </div>
           <div className="student-priority-table">
             <div className="student-priority-head"><span>学生</span><span>最新成绩</span><span>班级排名</span><span>名次变化</span><span>近期问题</span><span>家校协同</span></div>
@@ -1165,6 +1173,19 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
 
       <section className="card schedule-card">
         <div className="schedule-toolbar"><div><span className="date-button static-control">{weekLabel}</span></div><Pill tone="sage">周课表</Pill></div>
+        {weekLessons.length === 0 ? (
+          <div className="upload-zone schedule-empty-state">
+            <span className="upload-mark">▦</span>
+            <h3>本周还没有课次</h3>
+            <p>导入课表或新增重复课次后，这里会按周自动排好。</p>
+            {!readOnly ? (
+              <div className="data-actions-row">
+                <button type="button" className="button button-soft" onClick={onImportLessons}>导入课表</button>
+                <button type="button" className="button button-primary" onClick={onAddTemplate}>＋ 重复课次</button>
+              </div>
+            ) : null}
+          </div>
+        ) : (
         <div className="schedule-table" role="table" aria-label="本周课表">
           <div className="schedule-row schedule-head" role="row"><span role="columnheader">时间</span>{weekDates.map((date) => { const day = new Date(`${date}T12:00:00+08:00`).getUTCDay(); return <span key={date} role="columnheader">{weekdayLabels[day]} {Number(date.slice(8, 10))}</span>; })}</div>
           {timeRows.map((time) => (
@@ -1181,6 +1202,7 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
             </div>
           ))}
         </div>
+        )}
       </section>
     </>
   );
@@ -1400,7 +1422,13 @@ function TasksView({
                 </article>
               );
             })}
-            {!tasks.length ? <div className="empty-list">当前筛选下没有事项</div> : null}
+            {!tasks.length ? (
+              <div className="empty-list">
+                {allTasks.length === 0
+                  ? (!readOnly ? <span>还没有事项。<button type="button" className="text-button" onClick={onQuickAdd}>新建第一个事项 <span>→</span></button></span> : null)
+                  : "当前筛选下没有事项"}
+              </div>
+            ) : null}
           </div>
         </section>
         <aside className="tasks-aside">
@@ -1427,7 +1455,7 @@ function ResourcesView({ resources }: { resources: WorkbenchData["resources"] })
       <div className="resource-toolbar card"><label className="inline-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资料名称、学科或班级" /></label><div className="filter-chips">{filters.map((filter) => <button type="button" key={filter} className={kind === filter ? "active" : ""} onClick={() => setKind(filter)}>{filter}</button>)}</div></div>
       <div className="resource-grid">
         {visible.map((resource, index) => <article className="resource-card card" key={resource.id}><span className={`file-mark ${["sage", "apricot", "blue", "violet", "rose"][index % 5]}`}>{resource.kind.slice(0, 1)}</span><span><Pill tone="sage">{resource.kind}</Pill><strong>{resource.title}</strong><small>{resource.gradeOrClass} · {resource.subject}</small><small>{resource.location}</small></span></article>)}
-        {!visible.length ? <div className="empty-list card">没有找到符合条件的资料</div> : null}
+        {!visible.length ? <div className="empty-list card">{resources.length === 0 ? "还没有资料记录。" : "没有找到符合条件的资料，换个关键词或类别再试。"}</div> : null}
       </div>
     </>
   );
