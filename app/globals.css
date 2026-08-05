@@ -2793,3 +2793,72 @@ kbd {
 .exception-form { padding: 0; }
 .exception-form .form-grid { margin-bottom: 10px; }
 .modal-section { margin-top: 4px; }
+
+/* ---- 首页成绩信号提示栏 ---- */
+.signal-strip { display: grid; gap: 8px; margin-bottom: 18px; }
+.signal-item { display: flex; align-items: center; gap: 8px; border-radius: 12px; border: 1px solid var(--line); background: #fff; }
+.signal-item.signal-green { border-color: #cfe0d4; background: #f2f7f3; }
+.signal-item.signal-red { border-color: #eccfc9; background: #fbf3f1; }
+.signal-item.signal-yellow { border-color: #ecdcbb; background: #fbf7ec; }
+.signal-body { display: flex; flex: 1; align-items: center; gap: 10px; padding: 10px 12px; border: 0; background: 0; text-align: left; cursor: pointer; min-width: 0; }
+.signal-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; }
+.signal-green .signal-dot { background: #4a7a5f; }
+.signal-red .signal-dot { background: #b4564a; }
+.signal-yellow .signal-dot { background: #c19a3f; }
+.signal-copy { display: grid; gap: 2px; min-width: 0; }
+.signal-copy strong { font-size: 10px; color: var(--ink); }
+.signal-copy small { font-size: 8.5px; color: var(--muted); }
+.signal-go { margin-left: auto; color: var(--muted); font-size: 11px; }
+.signal-dismiss { flex: 0 0 auto; margin-right: 10px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--muted); font-size: 8px; cursor: pointer; }
+.signal-dismiss:hover { color: var(--ink); border-color: var(--line-strong); }
+
+/* ---- 学生详情页 ---- */
+.detail-topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.student-hero { display: flex; align-items: center; gap: 16px; padding: 20px 22px; margin-bottom: 16px; }
+.student-hero-main { flex: 1; min-width: 0; }
+.student-hero-main h1 { margin: 0; font-size: 24px; letter-spacing: -.02em; }
+.student-hero-main p { margin: 5px 0 0; color: var(--muted); font-size: 9px; }
+.student-hero-metrics { display: flex; gap: 10px; }
+.student-hero-metrics > div { display: grid; gap: 3px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); min-width: 92px; }
+.student-hero-metrics small { color: var(--muted); font-size: 8px; }
+.student-hero-metrics strong { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.student-hero-metrics strong em { font-size: 10px; font-style: normal; color: var(--muted); font-weight: 500; }
+.student-hero-metrics .positive strong { color: #3f7a58; }
+.student-hero-metrics .negative strong { color: #b4564a; }
+.detail-grid { display: grid; grid-template-columns: 1.3fr minmax(360px, .9fr); gap: 16px; align-items: start; }
+.detail-chart-card { padding: 18px 20px; }
+.subheading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.subheading h3 { margin: 0; font-size: 13px; }
+.subheading p { margin: 3px 0 0; color: var(--muted); font-size: 8px; }
+.trend-chart { width: 100%; height: auto; display: block; }
+.trend-grid { stroke: var(--line); stroke-width: 1; }
+.trend-tick { font-size: 9px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.trend-line { fill: none; stroke: var(--green); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.trend-avg { fill: none; stroke: #c8a06a; stroke-width: 1.4; stroke-dasharray: 4 4; }
+.trend-dot { fill: var(--green); }
+.trend-value { font-size: 10px; font-weight: 600; fill: var(--ink); font-variant-numeric: tabular-nums; }
+.trend-label { font-size: 9.5px; fill: var(--muted); }
+.trend-empty { display: grid; min-height: 160px; place-items: center; color: var(--muted); font-size: 9px; }
+.subject-breakdown { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+.subject-chip { display: grid; gap: 2px; min-width: 96px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.subject-chip small { color: var(--muted); font-size: 8px; }
+.subject-chip strong { font-size: 16px; font-variant-numeric: tabular-nums; }
+.subject-chip span { font-size: 8.5px; }
+.trend-up { color: #3f7a58; }
+.trend-down { color: #b4564a; }
+.detail-side { display: grid; gap: 14px; }
+.insights-card, .detail-issue-card, .detail-home-card { padding: 16px 18px; }
+.insights-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.insights-list li { position: relative; padding-left: 16px; color: #43514a; font-size: 9.5px; line-height: 1.55; }
+.insights-list li::before { position: absolute; left: 0; color: var(--green); content: "✓"; }
+.insight-signals { display: grid; gap: 6px; margin-top: 12px; }
+.insight-signal { margin: 0; padding: 8px 10px; border-radius: 9px; font-size: 8.5px; line-height: 1.5; }
+.insight-signal.signal-green { background: #f2f7f3; color: #3f6b52; }
+.insight-signal.signal-red { background: #fbf3f1; color: #96504a; }
+.insight-signal.signal-yellow { background: #fbf7ec; color: #8a6d2f; }
+.detail-issue-card p { margin: 0 0 10px; color: #43514a; font-size: 9.5px; line-height: 1.6; }
+@media (max-width: 900px) {
+  .detail-grid { grid-template-columns: 1fr; }
+  .student-hero { flex-wrap: wrap; }
+  .student-hero-metrics { flex-wrap: wrap; }
+}

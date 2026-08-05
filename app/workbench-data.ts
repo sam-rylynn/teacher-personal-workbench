@@ -361,6 +361,31 @@ function createSeedAssessments(
   }));
 }
 
+/** Extra single-subject demo records so the detail page shows per-subject trends. */
+function createSubjectAssessments(
+  studentId: string,
+  subject: string,
+  entries: readonly (readonly [number, number, number?])[],
+  cohortSize: number,
+  classAverage: number,
+): AssessmentRecord[] {
+  const dates = ["2026-09-06", "2026-09-13"] as const;
+  return entries.map(([score, rank, maxScore], index) => ({
+    id: `${studentId}-${subject}${index + 1}`,
+    title: index === 0 ? "单元一" : "单元二",
+    subject,
+    occurredOn: dates[index],
+    maxScore: maxScore ?? 100,
+    score,
+    rank,
+    cohortSize,
+    classAverage,
+    status: "已核对" as const,
+    source: "手工录入" as const,
+    verifiedAt: `${dates[index]}T18:00:00+08:00`,
+  }));
+}
+
 function createSeedStudents(): StudentRecord[] {
   return [
     {
@@ -369,7 +394,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级4班",
       initials: "明澈",
       color: "sage",
-      assessments: createSeedAssessments("S08403", [79, 81, 82, 85], [19, 17, 14, 10], 43, 79),
+      assessments: [...createSeedAssessments("S08403", [79, 81, 82, 85], [19, 17, 14, 10], 43, 79), ...createSubjectAssessments("S08403", "数学", [[85, 12], [88, 9]], 43, 80), ...createSubjectAssessments("S08403", "英语", [[72, 25], [74, 22]], 43, 76)],
       recentIssue: {
         id: "I08403",
         title: "文本依据仍不充分",
@@ -393,7 +418,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级4班",
       initials: "清禾",
       color: "apricot",
-      assessments: createSeedAssessments("S08412", [78, 82, 83, 81], [22, 17, 15, 19], 43, 79),
+      assessments: [...createSeedAssessments("S08412", [78, 82, 83, 81], [22, 17, 15, 19], 43, 79), ...createSubjectAssessments("S08412", "数学", [[80, 18], [78, 21]], 43, 80), ...createSubjectAssessments("S08412", "英语", [[83, 14], [85, 12]], 43, 76)],
       recentIssue: {
         id: "I08412",
         title: "补学清单还剩1项",
@@ -417,7 +442,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级2班",
       initials: "屿安",
       color: "blue",
-      assessments: createSeedAssessments("S08207", [78, 81, 84, 87], [21, 17, 12, 9], 44, 80),
+      assessments: [...createSeedAssessments("S08207", [78, 81, 84, 87], [21, 17, 12, 9], 44, 80), ...createSubjectAssessments("S08207", "数学", [[84, 13], [87, 8]], 44, 81), ...createSubjectAssessments("S08207", "英语", [[79, 20], [81, 17]], 44, 77)],
       recentIssue: {
         id: "I08207",
         title: "修改理由尚未写明",
@@ -441,7 +466,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级2班",
       initials: "雨桐",
       color: "rose",
-      assessments: createSeedAssessments("S08219", [86, 88, 90, 92], [8, 6, 4, 3], 44, 80),
+      assessments: [...createSeedAssessments("S08219", [86, 88, 90, 92], [8, 6, 4, 3], 44, 80), ...createSubjectAssessments("S08219", "数学", [[90, 5], [93, 2]], 44, 81), ...createSubjectAssessments("S08219", "英语", [[88, 7], [90, 5]], 44, 77)],
       recentIssue: {
         id: "I08219",
         title: "写作第二稿尚未提交",
@@ -465,7 +490,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级2班",
       initials: "知夏",
       color: "violet",
-      assessments: createSeedAssessments("S08231", [77, 79, 80, 76], [25, 23, 21, 28], 44, 80),
+      assessments: [...createSeedAssessments("S08231", [80, 78, 74, 69], [21, 23, 26, 30], 44, 80), ...createSubjectAssessments("S08231", "数学", [[74, 24], [71, 27]], 44, 81), ...createSubjectAssessments("S08231", "英语", [[77, 22], [75, 24]], 44, 77)],
       recentIssue: {
         id: "I08231",
         title: "阅读问题单尚未补写",
@@ -489,7 +514,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级4班",
       initials: "予宁",
       color: "teal",
-      assessments: createSeedAssessments("S08427", [83, 85, 87, 89], [13, 10, 7, 5], 43, 79),
+      assessments: [...createSeedAssessments("S08427", [83, 85, 87, 89], [13, 10, 7, 5], 43, 79), ...createSubjectAssessments("S08427", "数学", [[86, 10], [89, 6]], 43, 80), ...createSubjectAssessments("S08427", "英语", [[84, 13], [86, 11]], 43, 76)],
       recentIssue: {
         id: "I08427",
         title: "朗读停顿位置需复核",
@@ -513,7 +538,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级6班",
       initials: "星野",
       color: "gold",
-      assessments: createSeedAssessments("S08605", [84, 86, 88, 91], [12, 10, 7, 4], 42, 78),
+      assessments: [...createSeedAssessments("S08605", [84, 86, 88, 91], [12, 10, 7, 4], 42, 78), ...createSubjectAssessments("S08605", "数学", [[88, 8], [91, 4]], 42, 79), ...createSubjectAssessments("S08605", "英语", [[82, 16], [84, 14]], 42, 75)],
       recentIssue: {
         id: "I08605",
         title: "材料来源尚未补全",
@@ -537,7 +562,7 @@ function createSeedStudents(): StudentRecord[] {
       className: "八年级6班",
       initials: "书言",
       color: "coral",
-      assessments: createSeedAssessments("S08616", [71, 73, 75, 78], [34, 31, 28, 24], 42, 78),
+      assessments: [...createSeedAssessments("S08616", [71, 73, 75, 78], [34, 31, 28, 24], 42, 78), ...createSubjectAssessments("S08616", "数学", [[68, 33], [71, 30]], 42, 79), ...createSubjectAssessments("S08616", "英语", [[70, 31], [88, 28, 120]], 42, 75)],
       recentIssue: {
         id: "I08616",
         title: "论据与观点关系不直接",
@@ -1469,6 +1494,256 @@ export function saveDeviceLocalWorkbench(
 function roundTo(value: number, digits: number): number {
   const factor = 10 ** digits;
   return Math.round((value + Number.EPSILON) * factor) / factor;
+}
+
+/* ------------------------------------------------------------------------ */
+/* 成绩信号(首页提示栏)与分科/趋势分析                                      */
+/* ------------------------------------------------------------------------ */
+
+export type SignalTone = "green" | "red" | "yellow";
+
+export interface StudentSignal {
+  /** Stable per student + rule + latest assessment; a new assessment re-alerts. */
+  key: string;
+  tone: SignalTone;
+  rule: "improve-streak" | "decline-streak" | "cliff-drop" | "anomaly-jump" | "maxscore-change";
+  studentId: string;
+  studentName: string;
+  className: string;
+  title: string;
+  detail: string;
+}
+
+export interface SubjectBreakdown {
+  subject: string;
+  count: number;
+  latestRate: number;
+  deltaRate: number | null;
+  latestTitle: string;
+}
+
+export interface ScorePoint {
+  title: string;
+  occurredOn: string;
+  rate: number;
+  classAverage: number;
+  score: number;
+  maxScore: number;
+}
+
+/** Confirmed assessments of a student, oldest first. */
+function confirmedChronological(student: Pick<StudentRecord, "assessments">): AssessmentRecord[] {
+  return student.assessments
+    .filter((assessment) => assessment.status === "已核对" && assessment.maxScore > 0)
+    .slice()
+    .sort((left, right) => {
+      const order = left.occurredOn.localeCompare(right.occurredOn);
+      return order === 0 ? left.id.localeCompare(right.id) : order;
+    });
+}
+
+function scoreRateOf(assessment: AssessmentRecord): number {
+  return (assessment.score / assessment.maxScore) * 100;
+}
+
+/** Per-subject progress for the student detail page. */
+export function getSubjectBreakdown(student: StudentRecord): SubjectBreakdown[] {
+  const confirmed = confirmedChronological(student);
+  const bySubject = new Map<string, AssessmentRecord[]>();
+  for (const assessment of confirmed) {
+    const list = bySubject.get(assessment.subject) ?? [];
+    list.push(assessment);
+    bySubject.set(assessment.subject, list);
+  }
+  return Array.from(bySubject.entries())
+    .map(([subject, list]) => {
+      const latest = list.at(-1)!;
+      const previous = list.at(-2) ?? null;
+      return {
+        subject,
+        count: list.length,
+        latestRate: roundTo(scoreRateOf(latest), 1),
+        deltaRate: previous ? roundTo(scoreRateOf(latest) - scoreRateOf(previous), 1) : null,
+        latestTitle: latest.title,
+      };
+    })
+    .sort((left, right) => right.latestRate - left.latestRate);
+}
+
+/** Score-rate series for the trend chart (optionally one subject). */
+export function getScoreRateSeries(student: StudentRecord, subject?: string): ScorePoint[] {
+  return confirmedChronological(student)
+    .filter((assessment) => !subject || assessment.subject === subject)
+    .map((assessment) => ({
+      title: assessment.title,
+      occurredOn: assessment.occurredOn,
+      rate: roundTo(scoreRateOf(assessment), 1),
+      classAverage: assessment.maxScore > 0 ? roundTo((assessment.classAverage / assessment.maxScore) * 100, 1) : 0,
+      score: assessment.score,
+      maxScore: assessment.maxScore,
+    }));
+}
+
+/**
+ * Rule-based signals for the home alert strip, computed per subject (streaks
+ * only make sense within one subject's chronology). Green = two consecutive
+ * rises; red = two consecutive drops or one cliff drop (≥15 rate points);
+ * yellow = suspicious single rise (≥30 points) or an inconsistent full score
+ * that may need verification. All rules use 已核对 assessments only.
+ */
+export function analyzeStudentSignals(student: StudentRecord): StudentSignal[] {
+  const confirmed = confirmedChronological(student);
+  if (confirmed.length < 2) return [];
+  const base = { studentId: student.id, studentName: student.name, className: student.className };
+  const signals: StudentSignal[] = [];
+
+  const bySubject = new Map<string, AssessmentRecord[]>();
+  for (const assessment of confirmed) {
+    const list = bySubject.get(assessment.subject) ?? [];
+    list.push(assessment);
+    bySubject.set(assessment.subject, list);
+  }
+
+  for (const [subject, list] of bySubject) {
+    if (list.length < 2) continue;
+    const rates = list.map(scoreRateOf);
+    const latest = list.at(-1)!;
+    const previous = list.at(-2)!;
+    const lastDelta = roundTo(rates.at(-1)! - rates.at(-2)!, 1);
+    const scope = list.length === confirmed.length ? "" : `${subject}`;
+
+    if (list.length >= 3) {
+      const prevDelta = roundTo(rates.at(-2)! - rates.at(-3)!, 1);
+      if (lastDelta > 0 && prevDelta > 0) {
+        const weakest = getSubjectBreakdown(student);
+        const weak = weakest.length > 1 ? weakest.at(-1)! : null;
+        signals.push({
+          key: `${student.id}:improve-streak:${latest.id}`,
+          tone: "green",
+          rule: "improve-streak",
+          ...base,
+          title: `${student.name} ${scope}近两次持续上涨`,
+          detail: weak && weak.subject !== subject
+            ? `两次累计 +${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点;${weak.subject} 相对较弱,仍有提升空间。`
+            : `两次累计 +${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点,保持关注。`,
+        });
+      }
+      if (lastDelta < 0 && prevDelta < 0) {
+        signals.push({
+          key: `${student.id}:decline-streak:${latest.id}`,
+          tone: "red",
+          rule: "decline-streak",
+          ...base,
+          title: `${student.name} ${scope}近两次连续下降`,
+          detail: `两次累计 ${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点,建议关注原因。`,
+        });
+      }
+    }
+
+    if (lastDelta <= -15) {
+      signals.push({
+        key: `${student.id}:cliff-drop:${latest.id}`,
+        tone: "red",
+        rule: "cliff-drop",
+        ...base,
+        title: `${student.name} ${scope}最近一次降幅较大`,
+        detail: `得分率下降 ${Math.abs(lastDelta)} 个百分点,建议尽快了解原因。`,
+      });
+    }
+
+    if (lastDelta >= 30) {
+      signals.push({
+        key: `${student.id}:anomaly-jump:${latest.id}`,
+        tone: "yellow",
+        rule: "anomaly-jump",
+        ...base,
+        title: `${student.name} ${scope}最近一次涨幅较大`,
+        detail: `得分率上升 ${lastDelta} 个百分点,建议核对原始成绩。`,
+      });
+    }
+
+    if (latest.maxScore !== previous.maxScore) {
+      signals.push({
+        key: `${student.id}:maxscore-change:${latest.id}`,
+        tone: "yellow",
+        rule: "maxscore-change",
+        ...base,
+        title: `${student.name} ${scope}满分口径有变化`,
+        detail: `上次满分 ${previous.maxScore}、这次 ${latest.maxScore},建议核对是否录错。`,
+      });
+    }
+  }
+
+  return signals;
+}
+
+// Urgency order: a decline must never be crowded out by good news. When no
+// alerts exist, green good-news signals still surface.
+const SIGNAL_TONE_ORDER: Record<SignalTone, number> = { red: 0, yellow: 1, green: 2 };
+
+/** Aggregates signals across students: alerts first, dismissed excluded, max `limit`. */
+export function collectStudentSignals(
+  students: readonly StudentRecord[],
+  dismissed: ReadonlySet<string>,
+  limit = 3,
+): StudentSignal[] {
+  return students
+    .flatMap((student) => analyzeStudentSignals(student))
+    .filter((signal) => !dismissed.has(signal.key))
+    .sort((left, right) => {
+      const toneOrder = SIGNAL_TONE_ORDER[left.tone] - SIGNAL_TONE_ORDER[right.tone];
+      return toneOrder === 0 ? left.key.localeCompare(right.key) : toneOrder;
+    })
+    .slice(0, limit);
+}
+
+/** Rule-based local conclusions for the student detail page (no AI required). */
+export function buildStudentInsights(student: StudentRecord): string[] {
+  const confirmed = confirmedChronological(student);
+  const insights: string[] = [];
+  if (confirmed.length === 0) return insights;
+
+  const rates = confirmed.map(scoreRateOf);
+  const latest = confirmed.at(-1)!;
+  const latestRate = rates.at(-1)!;
+
+  // Consecutive direction streaks counting back from the latest assessment.
+  let riseStreak = 0;
+  for (let index = rates.length - 1; index > 0; index -= 1) {
+    if (rates[index] > rates[index - 1]) riseStreak += 1;
+    else break;
+  }
+  let dropStreak = 0;
+  for (let index = rates.length - 1; index > 0; index -= 1) {
+    if (rates[index] < rates[index - 1]) dropStreak += 1;
+    else break;
+  }
+  if (riseStreak >= 2) insights.push(`连续 ${riseStreak} 次得分率上升,处于上升通道。`);
+  if (dropStreak >= 2) insights.push(`连续 ${dropStreak} 次得分率下降,建议关注近期学习状态。`);
+
+  const classAvgRate = latest.maxScore > 0 ? roundTo((latest.classAverage / latest.maxScore) * 100, 1) : null;
+  if (classAvgRate !== null) {
+    const gap = roundTo(latestRate - classAvgRate, 1);
+    if (gap > 0) insights.push(`最近一次高于班级均分 ${gap} 个百分点。`);
+    else if (gap < 0) insights.push(`最近一次低于班级均分 ${Math.abs(gap)} 个百分点。`);
+    else insights.push("最近一次与班级均分持平。");
+  }
+
+  const subjects = getSubjectBreakdown(student);
+  if (subjects.length > 1) {
+    insights.push(`相对较弱科目:${subjects.at(-1)!.subject}(得分率 ${subjects.at(-1)!.latestRate})。`);
+    insights.push(`相对优势科目:${subjects[0].subject}(得分率 ${subjects[0].latestRate})。`);
+  }
+
+  const spread = roundTo(Math.max(...rates) - Math.min(...rates), 1);
+  if (spread >= 20) insights.push(`历史波动 ${spread} 个百分点,波动偏大,建议观察稳定性。`);
+
+  const change = getAssessmentChange(student);
+  if (change.rankDelta !== null && Math.abs(change.rankDelta) >= 10) {
+    insights.push(change.rankDelta > 0 ? `班级排名上升 ${change.rankDelta} 名。` : `班级排名下降 ${Math.abs(change.rankDelta)} 名。`);
+  }
+
+  return insights;
 }
 
 /* ------------------------------------------------------------------------ */

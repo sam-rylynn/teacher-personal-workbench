@@ -6,12 +6,17 @@ import {
   DESKTOP_DEVICE_LOCAL_ACCESS,
   MOBILE_READ_ONLY_ACCESS,
   SUPPORT_WILLINGNESS_LABELS,
+  analyzeStudentSignals,
   applyWorkbenchUpdate,
+  buildStudentInsights,
+  collectStudentSignals,
   createEmptyWorkbenchData,
   createMobileReadOnlySnapshot,
   createSeedWorkbenchData,
   expandLessonsForRange,
   getAssessmentChange,
+  getScoreRateSeries,
+  getSubjectBreakdown,
   getDeviceLocalDate,
   listDeviceLocalBackups,
   loadDeviceLocalWorkbench,
@@ -28,6 +33,7 @@ import {
   type SchoolStage,
   type StudentIssueStatus,
   type StudentRecord,
+  type StudentSignal,
   type TaskCategory,
   type WorkbenchBackupEntry,
   type WorkbenchData,
@@ -52,7 +58,7 @@ import {
   type LessonImportPlan,
 } from "./workbench-transfer";
 
-type ViewKey = "today" | "teaching" | "students" | "tasks" | "resources";
+type ViewKey = "today" | "teaching" | "students" | "studentDetail" | "tasks" | "resources";
 type TaskFilter = "全部" | TaskCategory;
 type AccessMode = "checking" | "desktop" | "mobile";
 type StudentChartMode = "score" | "rank";
@@ -234,6 +240,14 @@ export default function TeacherWorkbench() {
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
   const [importKind, setImportKind] = useState<"assessments" | "lessons" | null>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [dismissedSignals, setDismissedSignals] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      return new Set(JSON.parse(window.localStorage.getItem("tw-dismissed-signals") ?? "[]") as string[]);
+    } catch {
+      return new Set();
+    }
+  });
   const [dataManageOpen, setDataManageOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
@@ -263,6 +277,30 @@ export default function TeacherWorkbench() {
     [workspace, displayDate],
   );
   const selectedLesson = effectiveLessons.find((lesson) => lesson.id === selectedLessonId) ?? workspace.lessons.find((lesson) => lesson.id === selectedLessonId) ?? null;
+  const homeSignals = useMemo(
+    () => collectStudentSignals(workspace.students, dismissedSignals, 3),
+    [workspace.students, dismissedSignals],
+  );
+
+  function dismissSignal(key: string) {
+    setDismissedSignals((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      try {
+        window.localStorage.setItem("tw-dismissed-signals", JSON.stringify([...next]));
+      } catch {
+        // 标记写入失败不影响关闭。
+      }
+      return next;
+    });
+  }
+
+  function openStudentDetail(id: string) {
+    setSelectedStudentId(id);
+    setStudentQuery("");
+    setStudentClass("全部班级");
+    setActiveView("studentDetail");
+  }
 
   const filteredStudents = useMemo(() => {
     const query = studentQuery.trim();
@@ -423,8 +461,7 @@ export default function TeacherWorkbench() {
 
   function selectSearchResult(result: SearchResult) {
     if (result.type === "学生") {
-      setSelectedStudentId(result.id);
-      setActiveView("students");
+      openStudentDetail(result.id);
     } else if (result.type === "事项") {
       setActiveView("tasks");
     } else if (result.type === "课次") {
@@ -435,13 +472,6 @@ export default function TeacherWorkbench() {
     }
     setSearchOpen(false);
     setGlobalQuery("");
-  }
-
-  function openStudent(id: string) {
-    setSelectedStudentId(id);
-    setStudentQuery("");
-    setStudentClass("全部班级");
-    setActiveView("students");
   }
 
   function toggleTask(id: string) {
@@ -805,12 +835,14 @@ export default function TeacherWorkbench() {
               summary={summary}
               completedToday={completedToday}
               lessons={effectiveLessons}
+              signals={homeSignals}
+              onDismissSignal={dismissSignal}
               onToggleTask={toggleTask}
               onOpenLesson={setSelectedLessonId}
               onOpenQuickAdd={() => setStudentEditorOpen(true)}
               onGoTasks={() => setActiveView("tasks")}
               onGoStudents={() => setActiveView("students")}
-              onOpenStudent={openStudent}
+              onOpenStudent={openStudentDetail}
               readOnly={readOnly}
             />
           ) : null}
@@ -837,9 +869,20 @@ export default function TeacherWorkbench() {
               onSelect={setSelectedStudentId}
               onQuickAdd={() => setStudentEditorOpen(true)}
               onImportAssessments={() => setImportKind("assessments")}
+              onOpenDetail={openStudentDetail}
               onParentCommunication={(value) => selectedStudent && updateParentRating(selectedStudent.id, "communication", value)}
               onParentSupport={(value) => selectedStudent && updateParentRating(selectedStudent.id, "support", value)}
               readOnly={readOnly}
+            />
+          ) : null}
+          {activeView === "studentDetail" && selectedStudent ? (
+            <StudentDetailView
+              student={selectedStudent}
+              readOnly={readOnly}
+              onBack={() => setActiveView("students")}
+              onQuickAdd={() => setStudentEditorOpen(true)}
+              onParentCommunication={(value) => updateParentRating(selectedStudent.id, "communication", value)}
+              onParentSupport={(value) => updateParentRating(selectedStudent.id, "support", value)}
             />
           ) : null}
           {activeView === "tasks" ? (
@@ -965,6 +1008,8 @@ function TodayView({
   summary,
   completedToday,
   lessons,
+  signals,
+  onDismissSignal,
   onToggleTask,
   onOpenLesson,
   onOpenQuickAdd,
@@ -977,6 +1022,8 @@ function TodayView({
   summary: ReturnType<typeof summarizeWorkbench>;
   completedToday: number;
   lessons: LessonSession[];
+  signals: StudentSignal[];
+  onDismissSignal: (key: string) => void;
   onToggleTask: (id: string) => void;
   onOpenLesson: (id: string) => void;
   onOpenQuickAdd: () => void;
@@ -1003,6 +1050,21 @@ function TodayView({
             : `还有 ${summary.openTasks} 件未完成事项，先做最紧急的三件。`}
         actions={!readOnly ? <button type="button" className="button button-soft" onClick={onOpenQuickAdd}><span aria-hidden="true">＋</span> 更新学生情况</button> : undefined}
       />
+
+      {signals.length ? (
+        <div className="signal-strip" aria-label="成绩变动提醒">
+          {signals.map((signal) => (
+            <div key={signal.key} className={`signal-item signal-${signal.tone}`}>
+              <button type="button" className="signal-body" onClick={() => onOpenStudent(signal.studentId)}>
+                <span className="signal-dot" aria-hidden="true" />
+                <span className="signal-copy"><strong>{signal.title}</strong><small>{signal.detail}</small></span>
+                <span className="signal-go" aria-hidden="true">→</span>
+              </button>
+              <button type="button" className="signal-dismiss" onClick={() => onDismissSignal(signal.key)} aria-label={`知道了:${signal.title}`}>我知道了</button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="today-grid">
         {nextLesson ? (
@@ -1135,6 +1197,7 @@ function StudentsView({
   onSelect,
   onQuickAdd,
   onImportAssessments,
+  onOpenDetail,
   onParentCommunication,
   onParentSupport,
   readOnly,
@@ -1149,6 +1212,7 @@ function StudentsView({
   onSelect: (id: string) => void;
   onQuickAdd: () => void;
   onImportAssessments: () => void;
+  onOpenDetail: (id: string) => void;
   onParentCommunication: (value: 1 | 2 | 3 | 4 | 5) => void;
   onParentSupport: (value: 1 | 2 | 3 | 4 | 5) => void;
   readOnly: boolean;
@@ -1218,7 +1282,10 @@ function StudentsView({
           <div className="student-profile-head">
             <Avatar student={selectedStudent} size="large" />
             <div><div className="name-line"><h2>{selectedStudent.name}</h2><Pill tone="sage">{selectedStudent.className}</Pill></div><p>最近一次测评：{latest ? `${latest.title} · ${latest.occurredOn}` : "暂无"}</p></div>
-            {!readOnly ? <button type="button" className="button button-soft" onClick={onQuickAdd}>更新成绩或问题</button> : null}
+            <div className="section-actions">
+              <button type="button" className="text-button" onClick={() => onOpenDetail(selectedStudent.id)}>完整档案 →</button>
+              {!readOnly ? <button type="button" className="button button-soft" onClick={onQuickAdd}>更新成绩或问题</button> : null}
+            </div>
           </div>
 
           <div className="student-performance-grid">
@@ -2320,5 +2387,158 @@ function OnboardingWizard({
         </div>
       </section>
     </div>
+  );
+}
+
+/** 得分率趋势折线图(带班级均分虚线),纯 SVG,无外部依赖。 */
+function TrendChart({ points }: { points: ReturnType<typeof getScoreRateSeries> }) {
+  const width = 560;
+  const height = 180;
+  const padL = 36;
+  const padR = 14;
+  const padT = 16;
+  const padB = 30;
+  const innerW = width - padL - padR;
+  const innerH = height - padT - padB;
+  const xFor = (index: number) => (points.length === 1 ? padL + innerW / 2 : padL + (index / (points.length - 1)) * innerW);
+  const yFor = (rate: number) => padT + ((100 - Math.max(0, Math.min(100, rate))) / 100) * innerH;
+  const line = points.map((point, index) => `${index === 0 ? "M" : "L"}${xFor(index).toFixed(1)},${yFor(point.rate).toFixed(1)}`).join(" ");
+  const avgLine = points.map((point, index) => `${index === 0 ? "M" : "L"}${xFor(index).toFixed(1)},${yFor(point.classAverage).toFixed(1)}`).join(" ");
+
+  if (!points.length) {
+    return <div className="trend-empty">还没有已核对的测评记录</div>;
+  }
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="trend-chart" role="img" aria-label="得分率趋势">
+      {[0, 25, 50, 75, 100].map((tick) => (
+        <g key={tick}>
+          <line x1={padL} x2={width - padR} y1={yFor(tick)} y2={yFor(tick)} className="trend-grid" />
+          <text x={padL - 6} y={yFor(tick) + 3} textAnchor="end" className="trend-tick">{tick}</text>
+        </g>
+      ))}
+      <path d={avgLine} className="trend-avg" />
+      <path d={line} className="trend-line" />
+      {points.map((point, index) => (
+        <g key={`${point.occurredOn}-${index}`}>
+          <circle cx={xFor(index)} cy={yFor(point.rate)} r={3.4} className="trend-dot" />
+          <text x={xFor(index)} y={yFor(point.rate) - 8} textAnchor="middle" className="trend-value">{point.rate}</text>
+          <text x={xFor(index)} y={height - 10} textAnchor="middle" className="trend-label">{point.title}</text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function StudentDetailView({
+  student,
+  readOnly,
+  onBack,
+  onQuickAdd,
+  onParentCommunication,
+  onParentSupport,
+}: {
+  student: StudentRecord;
+  readOnly: boolean;
+  onBack: () => void;
+  onQuickAdd: () => void;
+  onParentCommunication: (value: 1 | 2 | 3 | 4 | 5) => void;
+  onParentSupport: (value: 1 | 2 | 3 | 4 | 5) => void;
+}) {
+  const [subject, setSubject] = useState("全部");
+  const subjects = getSubjectBreakdown(student);
+  const subjectNames = ["全部", ...subjects.map((item) => item.subject)];
+  const points = getScoreRateSeries(student, subject === "全部" ? undefined : subject);
+  const progress = getAssessmentChange(student);
+  const latest = progress.latest;
+  const insights = buildStudentInsights(student);
+  const signals = analyzeStudentSignals(student);
+  const latestRate = latest && latest.maxScore > 0 ? Math.round((latest.score / latest.maxScore) * 1000) / 10 : null;
+
+  return (
+    <>
+      <div className="detail-topbar">
+        <button type="button" className="text-button" onClick={onBack}>← 学生档案</button>
+        {!readOnly ? <button type="button" className="button button-soft" onClick={onQuickAdd}>更新成绩或问题</button> : null}
+      </div>
+
+      <div className="card student-hero">
+        <Avatar student={student} size="large" />
+        <div className="student-hero-main">
+          <div className="name-line"><h1>{student.name}</h1><Pill tone="sage">{student.className}</Pill></div>
+          <p>最近一次测评:{latest ? `${latest.title} · ${latest.occurredOn}` : "暂无"}</p>
+        </div>
+        <div className="student-hero-metrics">
+          <div><small>最新得分率</small><strong>{latestRate ?? "—"}<em>%</em></strong></div>
+          <div><small>当前排名</small><strong>{latest ? `${latest.rank}` : "—"}<em>{latest ? `/${latest.cohortSize}` : ""}</em></strong></div>
+          <div className={(progress.rankDelta ?? 0) >= 0 ? "positive" : "negative"}><small>较上次</small><strong>{formatChange(progress.rankDelta, "")}<em>名</em></strong></div>
+        </div>
+      </div>
+
+      <div className="detail-grid">
+        <section className="card detail-chart-card">
+          <div className="subheading">
+            <div><h3>得分率趋势</h3><p>虚线为班级均分</p></div>
+            <div className="segmented-control compact">
+              {subjectNames.map((name) => (
+                <button key={name} type="button" className={subject === name ? "active" : ""} onClick={() => setSubject(name)}>{name}</button>
+              ))}
+            </div>
+          </div>
+          <TrendChart points={points} />
+          <div className="subject-breakdown">
+            {subjects.map((item) => (
+              <div key={item.subject} className="subject-chip">
+                <small>{item.subject}</small>
+                <strong>{item.latestRate}</strong>
+                <span className={(item.deltaRate ?? 0) >= 0 ? "trend-up" : "trend-down"}>
+                  {item.deltaRate === null ? "首次" : `${item.deltaRate > 0 ? "+" : ""}${item.deltaRate}`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <aside className="detail-side">
+          <section className="card insights-card">
+            <div className="subheading"><div><h3>统计结论</h3><p>由本地规则计算,AI 建议接入后展示</p></div></div>
+            {insights.length ? (
+              <ul className="insights-list">
+                {insights.map((insight) => <li key={insight}>{insight}</li>)}
+              </ul>
+            ) : <p className="data-empty">还没有足够的已核对测评生成结论。</p>}
+            {signals.length ? (
+              <div className="insight-signals">
+                {signals.map((signal) => (
+                  <p key={signal.key} className={`insight-signal signal-${signal.tone}`}>{signal.title}:{signal.detail}</p>
+                ))}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="card detail-issue-card">
+            <div className="subheading"><h3>近期问题</h3><Pill tone={toneForIssue(student.recentIssue?.status)}>{student.recentIssue?.status ?? "暂无"}</Pill></div>
+            <p>{student.recentIssue?.detail ?? "当前没有待跟进问题。"}</p>
+            <div className="issue-next"><small>下一步</small><strong>{student.recentIssue?.nextAction ?? "暂无安排"}</strong></div>
+          </section>
+
+          <section className="card detail-home-card">
+            <div className="subheading"><div><h3>家校协同</h3><p>由老师手动选择</p></div></div>
+            <div className="rating-block">
+              <div className="rating-title"><span>沟通难度</span><strong>{COMMUNICATION_DIFFICULTY_LABELS[student.homeSchool.communicationDifficulty]}</strong></div>
+              <div className="rating-options" role="group" aria-label="家长沟通难度">
+                {COMMUNICATION_DIFFICULTY_LABELS.slice(1).map((label, index) => <button type="button" key={label} disabled={readOnly} className={student.homeSchool.communicationDifficulty === index + 1 ? "active" : ""} onClick={() => onParentCommunication((index + 1) as 1 | 2 | 3 | 4 | 5)}><span>{index + 1}</span><small>{label}</small></button>)}
+              </div>
+            </div>
+            <div className="rating-block">
+              <div className="rating-title"><span>家长辅助意愿</span><strong>{SUPPORT_WILLINGNESS_LABELS[student.homeSchool.supportWillingness]}</strong></div>
+              <div className="rating-options support" role="group" aria-label="家长辅助意愿">
+                {SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <button type="button" key={label} disabled={readOnly} className={student.homeSchool.supportWillingness === index + 1 ? "active" : ""} onClick={() => onParentSupport((index + 1) as 1 | 2 | 3 | 4 | 5)}><span>{index + 1}</span><small>{label}</small></button>)}
+              </div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </>
   );
 }

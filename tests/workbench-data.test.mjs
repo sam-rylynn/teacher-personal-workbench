@@ -135,7 +135,7 @@ test("task, assessment, and home-school changes survive a device-local save and 
   );
 
   assert.equal(original.tasks.find((task) => task.id === "T001")?.status, "进行中");
-  assert.equal(original.students.find((student) => student.id === "S08403")?.assessments.length, 4);
+  assert.equal(original.students.find((student) => student.id === "S08403")?.assessments.length, 8);
   assert.equal(updated.meta.revision, original.meta.revision + 1);
 
   const saveResult = saveDeviceLocalWorkbench(updated, {

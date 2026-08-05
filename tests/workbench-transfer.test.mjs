@@ -116,7 +116,7 @@ test("applyAssessmentImportPlan creates students and marks records unverified", 
   assert.equal(imported.assessments[0].source, "表格导入");
   assert.equal(imported.recentIssue, null);
   const existing = updated.students.find((student) => student.name === "李明澈");
-  assert.equal(existing.assessments.length, 5);
+  assert.equal(existing.assessments.length, 9);
   // Source data is untouched.
   assert.equal(data.students.length, 8);
 });
@@ -337,4 +337,67 @@ test("inbox quick-capture serializes, parses and converts to pending tasks", () 
 
   assert.throws(() => parseInbox("不是 json"), /速记/);
   assert.throws(() => parseInbox("{}"), /没有识别到速记内容/);
+});
+
+test("student signals: green streak, red streak, cliff drop, anomaly and maxscore change", async () => {
+  const { analyzeStudentSignals, collectStudentSignals, buildStudentInsights, getSubjectBreakdown } = await import("../app/workbench-data.ts");
+
+  const make = (scores) => ({
+    id: "SX",
+    name: "测试生",
+    className: "八年级1班",
+    initials: "测试",
+    color: "sage",
+    recentIssue: null,
+    homeSchool: { communicationDifficulty: 3, communicationNote: "", supportWillingness: 3, supportNote: "", updatedAt: "2026-09-01T00:00:00+08:00" },
+    assessments: scores.map(([score, maxScore, i]) => ({
+      id: `A${i}`, title: `测${i}`, subject: "语文", occurredOn: `2026-09-0${i}`,
+      maxScore, score, rank: 10, cohortSize: 45, classAverage: maxScore * 0.75,
+      status: "已核对", source: "手工录入",
+    })),
+  });
+
+  // 绿色:连续两次上涨
+  const green = analyzeStudentSignals(make([[60, 100, 1], [70, 100, 2], [80, 100, 3]]));
+  assert.ok(green.some((s) => s.tone === "green" && s.rule === "improve-streak"));
+
+  // 红色:连续两次下降
+  const red = analyzeStudentSignals(make([[80, 100, 1], [72, 100, 2], [65, 100, 3]]));
+  assert.ok(red.some((s) => s.tone === "red" && s.rule === "decline-streak"));
+
+  // 红色断崖:单次降幅 ≥15 个百分点
+  const cliff = analyzeStudentSignals(make([[85, 100, 1], [68, 100, 2]]));
+  assert.ok(cliff.some((s) => s.tone === "red" && s.rule === "cliff-drop"));
+
+  // 黄色异常:单次涨幅 ≥30
+  const jump = analyzeStudentSignals(make([[55, 100, 1], [90, 100, 2]]));
+  assert.ok(jump.some((s) => s.tone === "yellow" && s.rule === "anomaly-jump"));
+
+  // 黄色满分不一致:100 → 300
+  const maxChange = analyzeStudentSignals(make([[80, 100, 1], [240, 300, 2]]));
+  assert.ok(maxChange.some((s) => s.tone === "yellow" && s.rule === "maxscore-change"));
+
+  // 未核对测评不参与判定
+  const unconfirmed = make([[60, 100, 1], [70, 100, 2], [85, 100, 3]]);
+  unconfirmed.assessments[2].status = "待核对";
+  assert.equal(analyzeStudentSignals(unconfirmed).filter((s) => s.rule === "improve-streak").length, 0);
+
+  // 聚合:绿优先、去重已关闭、最多3条
+  const students = [
+    { ...make([[60, 100, 1], [70, 100, 2], [80, 100, 3]]), id: "S1", name: "甲" },
+    { ...make([[80, 100, 1], [72, 100, 2], [65, 100, 3]]), id: "S2", name: "乙" },
+  ];
+  const collected = collectStudentSignals(students, new Set(), 3);
+  assert.ok(collected.length <= 3);
+  assert.equal(collected[0].tone, "red", "需关注的下降提示应排在最前,不被好消息挤掉");
+  const dismissed = new Set(collected.map((s) => s.key));
+  assert.equal(collectStudentSignals(students, dismissed, 3).length, 0, "全部关闭后应无提示");
+
+  // 分科与结论
+  const multi = make([[80, 100, 1], [85, 100, 2]]);
+  multi.assessments.push({ id: "M1", title: "单元一", subject: "数学", occurredOn: "2026-09-06", maxScore: 100, score: 62, rank: 30, cohortSize: 45, classAverage: 75, status: "已核对", source: "手工录入" });
+  const breakdown = getSubjectBreakdown(multi);
+  assert.equal(breakdown.length, 2);
+  const insights = buildStudentInsights(multi);
+  assert.ok(insights.some((text) => text.includes("相对较弱科目:数学")));
 });
