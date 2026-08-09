@@ -23,5 +23,5 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
-      - run: npm run launch -- --check
+      - run: node scripts/launch-workbench.mjs --check
       - run: npm audit --omit=dev --audit-level=high
