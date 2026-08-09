@@ -6,6 +6,7 @@ node_modules/
 # 构建产物
 dist/
 .next/
+.vinext/
 .wrangler/
 *.tsbuildinfo
 
@@ -26,3 +27,8 @@ Thumbs.db
 # 临时与日志
 *.log
 /tmp/
+
+# 本机交付产物与内部项目记忆
+/outputs/
+/work/
+/项目进度与记忆包-v*.md

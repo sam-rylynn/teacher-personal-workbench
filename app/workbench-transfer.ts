@@ -7,12 +7,17 @@
  */
 
 import {
+  MAX_LESSON_REMINDER_MINUTES,
   WORKBENCH_SCHEMA_VERSION,
   WORKBENCH_STORAGE_KIND,
-  deserializeWorkbenchData,
+  expandLessonsForRange,
   getDeviceLocalDate,
+  migrateWorkbenchData,
   type AssessmentRecord,
   type LessonSession,
+  type MobileReadOnlySnapshot,
+  type MobileStudentSummary,
+  type StorageLike,
   type StudentRecord,
   type TaskCategory,
   type WorkbenchBackupEntry,
@@ -135,6 +140,17 @@ function studentInitials(name: string): string {
 
 function findStudentByIdentity(students: readonly StudentRecord[], name: string, className: string): StudentRecord | undefined {
   return students.find((student) => student.name === name && student.className === className);
+}
+
+function reserveUniqueId(base: string, used: Set<string>): string {
+  let candidate = base;
+  let suffix = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  used.add(candidate);
+  return candidate;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -274,13 +290,16 @@ export function applyAssessmentImportPlan(
   let addedStudents = 0;
   let addedAssessments = 0;
   const byIdentity = new Map(draft.students.map((student) => [`${student.name}|${student.className}`, student]));
+  const usedStudentIds = new Set(draft.students.map((student) => student.id));
+  const usedAssessmentIds = new Set(draft.students.flatMap((student) => student.assessments.map((assessment) => assessment.id)));
+  const importStamp = now.replace(/\D/g, "").slice(0, 14);
 
   plan.entries.forEach((entry, index) => {
     const key = `${entry.studentName}|${entry.className}`;
     let student = byIdentity.get(key);
     if (!student) {
       student = {
-        id: `S-IMP-${now.replace(/\D/g, "").slice(0, 14)}-${index}`,
+        id: reserveUniqueId(`S-IMP-${importStamp}-${index}`, usedStudentIds),
         name: entry.studentName,
         className: entry.className,
         initials: studentInitials(entry.studentName),
@@ -288,10 +307,10 @@ export function applyAssessmentImportPlan(
         assessments: [],
         recentIssue: null,
         homeSchool: {
-          communicationDifficulty: 3,
-          communicationNote: "导入后尚未填写沟通情况。",
-          supportWillingness: 3,
-          supportNote: "导入后尚未填写家庭辅助情况。",
+          communicationDifficulty: 0,
+          communicationNote: "尚未设置，由老师手动选择。",
+          supportWillingness: 0,
+          supportNote: "尚未设置，由老师手动选择。",
           updatedAt: now,
         },
       };
@@ -301,7 +320,7 @@ export function applyAssessmentImportPlan(
     }
     student.assessments.push({
       ...entry.record,
-      id: `${student.id}-A-IMP-${now.replace(/\D/g, "").slice(0, 14)}-${index}`,
+      id: reserveUniqueId(`${student.id}-A-IMP-${importStamp}-${index}`, usedAssessmentIds),
     });
     addedAssessments += 1;
   });
@@ -389,6 +408,12 @@ export function planLessonImport(text: string, lessons: readonly LessonSession[]
     }
 
     const reminderMinutes = reminderRaw === "" ? null : Number.parseInt(reminderRaw.replace(/\D/g, ""), 10);
+    if (
+      reminderRaw !== "" &&
+      (typeof reminderMinutes !== "number" || !Number.isInteger(reminderMinutes) || reminderMinutes < 1 || reminderMinutes > MAX_LESSON_REMINDER_MINUTES)
+    ) {
+      return fail("提醒", `课前提醒应在 1 到 ${MAX_LESSON_REMINDER_MINUTES} 分钟之间。`);
+    }
     entries.push({
       record: {
         title,
@@ -399,7 +424,7 @@ export function planLessonImport(text: string, lessons: readonly LessonSession[]
         room,
         preparation: preparation || "按教案准备",
         status: "待上课",
-        reminderMinutesBefore: Number.isFinite(reminderMinutes) ? reminderMinutes : null,
+        reminderMinutesBefore: reminderMinutes,
       },
     });
   });
@@ -408,10 +433,12 @@ export function planLessonImport(text: string, lessons: readonly LessonSession[]
 }
 
 export function applyLessonImportPlan(draft: WorkbenchData, plan: LessonImportPlan, now: string): number {
+  const usedLessonIds = new Set(draft.lessons.map((lesson) => lesson.id));
+  const importStamp = now.replace(/\D/g, "").slice(0, 14);
   plan.entries.forEach((entry, index) => {
     draft.lessons.push({
       ...entry.record,
-      id: `L-IMP-${now.replace(/\D/g, "").slice(0, 14)}-${index}`,
+      id: reserveUniqueId(`L-IMP-${importStamp}-${index}`, usedLessonIds),
     });
   });
   return plan.entries.length;
@@ -445,17 +472,247 @@ export function parseWorkbenchImportText(text: string, now: string): WorkbenchHy
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error("文件内容不是有效的 JSON，请选择本工作台导出的数据文件。");
+    throw new Error("文件格式无法识别，请选择本工作台导出的数据文件。");
   }
   try {
-    return deserializeWorkbenchData(JSON.stringify(parsed), now) as WorkbenchHydrationResult & { source: "stored" | "migrated" };
+    return migrateWorkbenchData(parsed, now);
   } catch (error) {
     throw new Error(error instanceof Error ? `文件无法识别：${error.message}` : "文件无法识别。");
   }
 }
 
 export function readBackupEntry(entry: WorkbenchBackupEntry, now: string): WorkbenchHydrationResult & { source: "stored" | "migrated" } {
-  return deserializeWorkbenchData(entry.payload, now) as WorkbenchHydrationResult & { source: "stored" | "migrated" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(entry.payload);
+  } catch {
+    throw new Error("自动备份已损坏，未覆盖当前数据。");
+  }
+  try {
+    return migrateWorkbenchData(parsed, now);
+  } catch (error) {
+    throw new Error(error instanceof Error ? `自动备份无法识别：${error.message}` : "自动备份无法识别。");
+  }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Portable read-only mobile view                                            */
+/* ------------------------------------------------------------------------ */
+
+export const MOBILE_VIEW_FILE_KIND = "teacher-workbench-mobile-view" as const;
+export const MOBILE_VIEW_FILE_VERSION = 1 as const;
+export const MOBILE_VIEW_STORAGE_KEY = "teacher-workbench:mobile-view:v1" as const;
+export const MOBILE_VIEW_MAX_BYTES = 512 * 1024;
+
+export interface MobileViewFileV1 {
+  kind: typeof MOBILE_VIEW_FILE_KIND;
+  fileVersion: typeof MOBILE_VIEW_FILE_VERSION;
+  exportedAt: string;
+  snapshot: MobileReadOnlySnapshot;
+}
+
+export interface MobileViewImportResult {
+  envelope: MobileViewFileV1;
+  warnings: string[];
+}
+
+function mobileFileRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label}结构不正确。`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function exactMobileKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length) throw new Error(`${label}包含不支持的字段“${unknown[0]}”。`);
+}
+
+function mobileString(value: unknown, label: string, maxLength = 500): string {
+  if (typeof value !== "string" || !value.trim() || value.length > maxLength) {
+    throw new Error(`${label}不正确。`);
+  }
+  return value;
+}
+
+function mobileOptionalString(value: unknown, label: string, maxLength = 500): string | undefined {
+  if (value === undefined) return undefined;
+  return mobileString(value, label, maxLength);
+}
+
+function mobileNumber(value: unknown, label: string, options: { integer?: boolean; min?: number; max?: number } = {}): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label}不是有效数字。`);
+  if (options.integer && !Number.isInteger(value)) throw new Error(`${label}必须是整数。`);
+  if (options.min !== undefined && value < options.min) throw new Error(`${label}超出允许范围。`);
+  if (options.max !== undefined && value > options.max) throw new Error(`${label}超出允许范围。`);
+  return value;
+}
+
+function mobileNullableNumber(value: unknown, label: string): number | null {
+  return value === null ? null : mobileNumber(value, label);
+}
+
+function mobileIso(value: unknown, label: string): string {
+  const text = mobileString(value, label, 80);
+  if (Number.isNaN(new Date(text).getTime())) throw new Error(`${label}不是有效时间。`);
+  return text;
+}
+
+function rebuildMobileStudent(value: unknown, index: number): MobileStudentSummary {
+  const record = mobileFileRecord(value, `重点学生第 ${index + 1} 条`);
+  exactMobileKeys(record, ["id", "name", "className", "latestScore", "latestMaxScore", "currentRank", "cohortSize", "scoreDelta", "rankDelta", "issueTitle", "issueStatus"], `重点学生第 ${index + 1} 条`);
+  const issueStatus = record.issueStatus;
+  if (issueStatus !== null && issueStatus !== "待处理" && issueStatus !== "观察中" && issueStatus !== "已缓解") {
+    throw new Error(`重点学生第 ${index + 1} 条的问题状态不正确。`);
+  }
+  return {
+    id: mobileString(record.id, "学生编号", 120),
+    name: mobileString(record.name, "学生姓名", 80),
+    className: mobileString(record.className, "班级", 120),
+    latestScore: mobileNullableNumber(record.latestScore, "最新成绩"),
+    latestMaxScore: mobileNullableNumber(record.latestMaxScore, "满分"),
+    currentRank: mobileNullableNumber(record.currentRank, "当前排名"),
+    cohortSize: mobileNullableNumber(record.cohortSize, "参考人数"),
+    scoreDelta: mobileNullableNumber(record.scoreDelta, "成绩变化"),
+    rankDelta: mobileNullableNumber(record.rankDelta, "排名变化"),
+    issueTitle: record.issueTitle === null ? null : mobileString(record.issueTitle, "近期问题", 300),
+    issueStatus,
+  };
+}
+
+function rebuildMobileLesson(value: unknown, index: number): LessonSession {
+  const record = mobileFileRecord(value, `课次第 ${index + 1} 条`);
+  exactMobileKeys(record, ["id", "title", "subject", "className", "startsAt", "endsAt", "room", "preparation", "status", "reminderMinutesBefore"], `课次第 ${index + 1} 条`);
+  if (record.status !== "待上课" && record.status !== "已完成" && record.status !== "已取消") throw new Error(`课次第 ${index + 1} 条状态不正确。`);
+  return {
+    id: mobileString(record.id, "课次编号", 160),
+    title: mobileString(record.title, "课次标题", 300),
+    subject: mobileString(record.subject, "学科", 100),
+    className: mobileString(record.className, "班级", 120),
+    startsAt: mobileIso(record.startsAt, "课次开始时间"),
+    endsAt: mobileIso(record.endsAt, "课次结束时间"),
+    room: typeof record.room === "string" && record.room.length <= 300 ? record.room : (() => { throw new Error("课次地点不正确。"); })(),
+    preparation: typeof record.preparation === "string" && record.preparation.length <= 1000 ? record.preparation : (() => { throw new Error("备课清单不正确。"); })(),
+    status: record.status,
+    reminderMinutesBefore: record.reminderMinutesBefore === null ? null : mobileNumber(record.reminderMinutesBefore, "课前提醒", { min: 1, max: MAX_LESSON_REMINDER_MINUTES }),
+  };
+}
+
+function rebuildMobileTask(value: unknown, index: number): WorkbenchTask {
+  const record = mobileFileRecord(value, `事项第 ${index + 1} 条`);
+  exactMobileKeys(record, ["id", "category", "title", "dueAt", "estimatedMinutes", "status", "reminderAt", "relatedLabel", "completedAt"], `事项第 ${index + 1} 条`);
+  if (record.category !== "教学" && record.category !== "学生" && record.category !== "行政" && record.category !== "论文") throw new Error(`事项第 ${index + 1} 条类别不正确。`);
+  if (record.status !== "待开始" && record.status !== "进行中" && record.status !== "已完成") throw new Error(`事项第 ${index + 1} 条状态不正确。`);
+  const relatedLabel = mobileOptionalString(record.relatedLabel, "事项关联", 300);
+  const completedAt = mobileOptionalString(record.completedAt, "完成时间", 80);
+  return {
+    id: mobileString(record.id, "事项编号", 160),
+    category: record.category,
+    title: mobileString(record.title, "事项标题", 500),
+    dueAt: mobileIso(record.dueAt, "事项截止时间"),
+    estimatedMinutes: mobileNumber(record.estimatedMinutes, "预计用时", { min: 0, max: 10080 }),
+    status: record.status,
+    reminderAt: record.reminderAt === null ? null : mobileIso(record.reminderAt, "事项提醒时间"),
+    ...(relatedLabel ? { relatedLabel } : {}),
+    ...(completedAt ? { completedAt } : {}),
+  };
+}
+
+function rebuildMobileSummary(value: unknown): MobileReadOnlySnapshot["summary"] {
+  const record = mobileFileRecord(value, "摘要");
+  const keys = ["totalStudents", "studentsWithConfirmedAssessments", "rankImproved", "rankDeclined", "scoreImproved", "scoreDeclined", "issuesPending", "issuesWatching", "homeSchoolFollowUps", "openTasks", "openTaskMinutes", "lessonsOnDate", "averageLatestScoreRate"] as const;
+  exactMobileKeys(record, keys, "摘要");
+  const integer = (key: typeof keys[number]) => mobileNumber(record[key], `摘要.${key}`, { integer: true, min: 0, max: 100000 });
+  return {
+    totalStudents: integer("totalStudents"),
+    studentsWithConfirmedAssessments: integer("studentsWithConfirmedAssessments"),
+    rankImproved: integer("rankImproved"),
+    rankDeclined: integer("rankDeclined"),
+    scoreImproved: integer("scoreImproved"),
+    scoreDeclined: integer("scoreDeclined"),
+    issuesPending: integer("issuesPending"),
+    issuesWatching: integer("issuesWatching"),
+    homeSchoolFollowUps: integer("homeSchoolFollowUps"),
+    openTasks: integer("openTasks"),
+    openTaskMinutes: integer("openTaskMinutes"),
+    lessonsOnDate: integer("lessonsOnDate"),
+    averageLatestScoreRate: record.averageLatestScoreRate === null ? null : mobileNumber(record.averageLatestScoreRate, "平均得分率", { min: 0, max: 100 }),
+  };
+}
+
+function rebuildMobileSnapshot(value: unknown): MobileReadOnlySnapshot {
+  const record = mobileFileRecord(value, "手机看板");
+  exactMobileKeys(record, ["snapshotVersion", "snapshotId", "readOnly", "generatedAt", "sourceRevision", "workbenchName", "accent", "summary", "priorityStudents", "upcomingLessons", "openTasks"], "手机看板");
+  if (record.snapshotVersion !== 1 || record.readOnly !== true) throw new Error("手机看板版本或只读标记不正确。");
+  if (record.accent !== "松柏绿" && record.accent !== "黛蓝" && record.accent !== "暖橙") throw new Error("手机看板配色不正确。");
+  if (!Array.isArray(record.priorityStudents) || record.priorityStudents.length > 5) throw new Error("重点学生摘要最多只能包含 5 名。 ");
+  if (!Array.isArray(record.upcomingLessons) || record.upcomingLessons.length > 5) throw new Error("课次摘要最多只能包含 5 节。 ");
+  if (!Array.isArray(record.openTasks) || record.openTasks.length > 8) throw new Error("事项摘要最多只能包含 8 件。 ");
+  return {
+    snapshotVersion: 1,
+    snapshotId: mobileString(record.snapshotId, "内容编号", 180),
+    readOnly: true,
+    generatedAt: mobileIso(record.generatedAt, "生成时间"),
+    sourceRevision: mobileNumber(record.sourceRevision, "来源版本", { integer: true, min: 0 }),
+    workbenchName: mobileString(record.workbenchName, "工作台名称", 200),
+    accent: record.accent,
+    summary: rebuildMobileSummary(record.summary),
+    priorityStudents: record.priorityStudents.map(rebuildMobileStudent),
+    upcomingLessons: record.upcomingLessons.map(rebuildMobileLesson),
+    openTasks: record.openTasks.map(rebuildMobileTask),
+  };
+}
+
+export function serializeMobileViewFile(snapshot: MobileReadOnlySnapshot, exportedAt: string): string {
+  return JSON.stringify({
+    kind: MOBILE_VIEW_FILE_KIND,
+    fileVersion: MOBILE_VIEW_FILE_VERSION,
+    exportedAt,
+    snapshot: rebuildMobileSnapshot(snapshot),
+  } satisfies MobileViewFileV1, null, 2);
+}
+
+export function parseMobileViewFile(text: string, current: MobileReadOnlySnapshot | null = null): MobileViewImportResult {
+  if (new TextEncoder().encode(text).byteLength > MOBILE_VIEW_MAX_BYTES) throw new Error("手机查看文件超过 512KB，未导入。 ");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("文件不是有效的手机查看文件。 ");
+  }
+  const record = mobileFileRecord(parsed, "手机查看文件");
+  exactMobileKeys(record, ["kind", "fileVersion", "exportedAt", "snapshot"], "手机查看文件");
+  if (record.kind !== MOBILE_VIEW_FILE_KIND) throw new Error("请选择由电脑工作台生成的手机查看文件。 ");
+  if (record.fileVersion !== MOBILE_VIEW_FILE_VERSION) throw new Error("手机查看文件版本不受支持。 ");
+  const envelope: MobileViewFileV1 = {
+    kind: MOBILE_VIEW_FILE_KIND,
+    fileVersion: MOBILE_VIEW_FILE_VERSION,
+    exportedAt: mobileIso(record.exportedAt, "导出时间"),
+    snapshot: rebuildMobileSnapshot(record.snapshot),
+  };
+  const warnings = current && envelope.snapshot.generatedAt < current.generatedAt
+    ? ["这个文件比手机当前内容更早，导入后会显示较旧的摘要。"]
+    : [];
+  return { envelope, warnings };
+}
+
+export function saveImportedMobileView(storage: StorageLike, snapshot: MobileReadOnlySnapshot): { ok: true } | { ok: false; message: string } {
+  try {
+    storage.setItem(MOBILE_VIEW_STORAGE_KEY, serializeMobileViewFile(snapshot, snapshot.generatedAt));
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? `手机内容保存失败：${error.message}` : "手机内容保存失败。" };
+  }
+}
+
+export function loadImportedMobileView(storage: StorageLike): { snapshot: MobileReadOnlySnapshot | null; warning?: string } {
+  const text = storage.getItem(MOBILE_VIEW_STORAGE_KEY);
+  if (!text) return { snapshot: null };
+  try {
+    return { snapshot: parseMobileViewFile(text).envelope.snapshot };
+  } catch (error) {
+    return { snapshot: null, warning: error instanceof Error ? error.message : "手机内容无法读取，请重新导入。" };
+  }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -469,20 +726,58 @@ function toIcsUtc(iso: string): string {
 }
 
 function escapeIcsText(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+  return value.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r\n|\r|\n/g, "\\n");
 }
 
-function foldIcsLine(line: string): string {
-  const limit = 74;
-  if (line.length <= limit) return line;
+/** RFC 5545 folding by UTF-8 octets; continuation whitespace counts. */
+export function foldIcsLineUtf8(line: string, maxOctets = 75): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(line).byteLength <= maxOctets) return line;
   const parts: string[] = [];
-  let rest = line;
-  while (rest.length > limit) {
-    parts.push(rest.slice(0, limit));
-    rest = ` ${rest.slice(limit)}`;
+  let current = "";
+  let currentBytes = 0;
+  for (const character of line) {
+    const characterBytes = encoder.encode(character).byteLength;
+    if (current && currentBytes + characterBytes > maxOctets) {
+      parts.push(current);
+      current = ` ${character}`;
+      currentBytes = 1 + characterBytes;
+    } else {
+      current += character;
+      currentBytes += characterBytes;
+    }
   }
-  parts.push(rest);
+  if (current) parts.push(current);
   return parts.join("\r\n");
+}
+
+function addLocalDate(dateString: string, amount: number): string {
+  const date = new Date(`${dateString}T12:00:00+08:00`);
+  date.setUTCDate(date.getUTCDate() + amount);
+  return date.toISOString().slice(0, 10);
+}
+
+function getCalendarLessonRange(data: WorkbenchData, now: string): { fromDate: string; toDate: string } {
+  const localDate = getDeviceLocalDate(now, data.user.timeZone);
+  const rescheduledDates = (data.lessonExceptions ?? []).flatMap((exception) =>
+    exception.action === "reschedule" && exception.newDate && isValidDate(exception.newDate)
+      ? [exception.newDate]
+      : [],
+  );
+  const starts = [
+    ...data.lessons.map((lesson) => lesson.startsAt.slice(0, 10)),
+    ...(data.lessonTemplates ?? []).map((template) => template.semesterStart),
+    ...rescheduledDates,
+  ].filter(Boolean);
+  const ends = [
+    ...data.lessons.map((lesson) => lesson.startsAt.slice(0, 10)),
+    ...(data.lessonTemplates ?? []).map((template) => template.semesterEnd),
+    ...rescheduledDates,
+  ].filter(Boolean);
+  return {
+    fromDate: starts.length ? starts.sort()[0] : localDate,
+    toDate: ends.length ? ends.sort().at(-1)! : addLocalDate(localDate, 180),
+  };
 }
 
 /** Builds an RFC 5545 calendar with one event per lesson and per open task. */
@@ -496,12 +791,15 @@ export function buildIcsCalendar(data: WorkbenchData, now: string): string {
     `X-WR-CALNAME:${escapeIcsText(data.user.workbenchName)}`,
   ];
   const stamp = toIcsUtc(now);
+  const range = getCalendarLessonRange(data, now);
+  const effectiveLessons = expandLessonsForRange(data, range.fromDate, range.toDate, now);
 
-  for (const lesson of data.lessons) {
-    if (lesson.status === "已取消") continue;
+  for (const lesson of effectiveLessons) {
     lines.push("BEGIN:VEVENT");
     lines.push(`UID:${lesson.id}@teacher-workbench`);
     lines.push(`DTSTAMP:${stamp}`);
+    lines.push(`SEQUENCE:${data.meta.revision}`);
+    lines.push(`LAST-MODIFIED:${stamp}`);
     lines.push(`DTSTART:${toIcsUtc(lesson.startsAt)}`);
     lines.push(`DTEND:${toIcsUtc(lesson.endsAt)}`);
     lines.push(`SUMMARY:${escapeIcsText(`${lesson.className} ${lesson.subject}｜${lesson.title}`)}`);
@@ -521,12 +819,14 @@ export function buildIcsCalendar(data: WorkbenchData, now: string): string {
     if (task.status === "已完成") continue;
     const due = new Date(task.dueAt);
     if (Number.isNaN(due.getTime())) continue;
-    const end = new Date(due.getTime() + Math.max(15, task.estimatedMinutes) * 60_000);
+    const start = new Date(due.getTime() - Math.max(15, task.estimatedMinutes) * 60_000);
     lines.push("BEGIN:VEVENT");
     lines.push(`UID:${task.id}@teacher-workbench`);
     lines.push(`DTSTAMP:${stamp}`);
-    lines.push(`DTSTART:${toIcsUtc(task.dueAt)}`);
-    lines.push(`DTEND:${toIcsUtc(end.toISOString())}`);
+    lines.push(`SEQUENCE:${data.meta.revision}`);
+    lines.push(`LAST-MODIFIED:${stamp}`);
+    lines.push(`DTSTART:${toIcsUtc(start.toISOString())}`);
+    lines.push(`DTEND:${toIcsUtc(task.dueAt)}`);
     lines.push(`SUMMARY:${escapeIcsText(`事项｜${task.title}`)}`);
     lines.push(`DESCRIPTION:${escapeIcsText(`类别：${task.category}${task.relatedLabel ? `；关联：${task.relatedLabel}` : ""}`)}`);
     if (task.reminderAt) {
@@ -543,7 +843,7 @@ export function buildIcsCalendar(data: WorkbenchData, now: string): string {
   }
 
   lines.push("END:VCALENDAR");
-  return lines.map(foldIcsLine).join("\r\n") + "\r\n";
+  return lines.map((line) => foldIcsLineUtf8(line)).join("\r\n") + "\r\n";
 }
 
 /* ------------------------------------------------------------------------ */
@@ -567,8 +867,24 @@ export function computeDueReminders(data: WorkbenchData, nowIso: string, deliver
   const now = new Date(nowIso).getTime();
   if (Number.isNaN(now)) return [];
   const due: DueReminder[] = [];
+  const localDate = getDeviceLocalDate(nowIso, data.user.timeZone);
+  const lessonReminderMinutes = [
+    ...data.lessons.map((lesson) => lesson.reminderMinutesBefore),
+    ...(data.lessonTemplates ?? []).map((template) => template.reminderMinutesBefore),
+  ].filter((minutes): minutes is number => typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0);
+  const maxReminderMinutes = Math.min(
+    MAX_LESSON_REMINDER_MINUTES,
+    Math.max(0, ...lessonReminderMinutes),
+  );
+  const lookAheadDays = Math.max(1, Math.ceil(maxReminderMinutes / (24 * 60)));
+  const effectiveLessons = expandLessonsForRange(
+    data,
+    addLocalDate(localDate, -1),
+    addLocalDate(localDate, lookAheadDays),
+    nowIso,
+  );
 
-  for (const lesson of data.lessons) {
+  for (const lesson of effectiveLessons) {
     if (lesson.status !== "待上课" || lesson.reminderMinutesBefore === null) continue;
     const start = new Date(lesson.startsAt).getTime();
     if (Number.isNaN(start)) continue;
@@ -657,16 +973,19 @@ export function parseInbox(text: string): InboxItem[] {
 }
 
 /**
- * Converts captured notes into pending workbench tasks, due today at 18:00,
- * so the teacher reviews them on the desktop. Notes do not touch the
- * workspace until the teacher confirms on the PC.
+ * Converts captured notes into pending workbench tasks. Notes captured after
+ * 18:00 are due the next day, and none touch the workspace until the teacher
+ * confirms the import on the computer.
  */
-export function inboxToTasks(items: readonly InboxItem[], now: string, timeZone = "Asia/Shanghai"): Omit<WorkbenchTask, "id">[] {
+export function inboxToTasks(items: readonly InboxItem[], now: string, timeZone = "Asia/Shanghai"): Array<Omit<WorkbenchTask, "id"> & { sourceInboxId: string }> {
   const today = getDeviceLocalDate(now, timeZone);
+  const todayDue = `${today}T18:00:00+08:00`;
+  const dueDate = new Date(now).getTime() >= new Date(todayDue).getTime() ? addLocalDate(today, 1) : today;
   return items.map((item) => ({
+    sourceInboxId: item.id,
     category: item.category,
     title: item.text,
-    dueAt: `${today}T18:00:00+08:00`,
+    dueAt: `${dueDate}T18:00:00+08:00`,
     estimatedMinutes: 10,
     status: "待开始",
     reminderAt: null,

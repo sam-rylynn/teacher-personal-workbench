@@ -17,6 +17,7 @@ export const LEGACY_WORKBENCH_STORAGE_KEYS = [
 export const WORKBENCH_BACKUP_KEY =
   `teacher-workbench:${WORKBENCH_STORAGE_KIND}:v${WORKBENCH_SCHEMA_VERSION}:backups` as const;
 export const WORKBENCH_BACKUP_LIMIT = 3 as const;
+export const MAX_LESSON_REMINDER_MINUTES = 7 * 24 * 60;
 
 export type SchoolStage = "小学" | "初中" | "高中" | "教培";
 export type AssessmentStatus = "已核对" | "待核对";
@@ -25,6 +26,7 @@ export type StudentIssueStatus = "待处理" | "观察中" | "已缓解";
 export type TaskCategory = "教学" | "学生" | "行政" | "论文";
 export type TaskStatus = "待开始" | "进行中" | "已完成";
 export type ResourceKind = "教案" | "课件" | "练习" | "模板" | "参考资料";
+export type HomeSchoolRating = 0 | 1 | 2 | 3 | 4 | 5;
 
 export interface AssessmentRecord {
   id: string;
@@ -56,9 +58,11 @@ export interface StudentIssue {
  * Support willingness runs from 1 (no current action) to 5 (proactive).
  */
 export interface HomeSchoolProfile {
-  communicationDifficulty: 1 | 2 | 3 | 4 | 5;
+  /** 0 means the teacher has not made a selection yet. */
+  communicationDifficulty: HomeSchoolRating;
   communicationNote: string;
-  supportWillingness: 1 | 2 | 3 | 4 | 5;
+  /** 0 means the teacher has not made a selection yet. */
+  supportWillingness: HomeSchoolRating;
   supportNote: string;
   updatedAt: string;
 }
@@ -204,6 +208,7 @@ export interface WorkbenchDataV1 {
 export type WorkbenchData = WorkbenchDataV1;
 
 export interface AssessmentChange {
+  subject: string | null;
   latest: AssessmentRecord | null;
   previous: AssessmentRecord | null;
   scoreDelta: number | null;
@@ -316,7 +321,7 @@ export const MOBILE_READ_ONLY_ACCESS: WorkbenchWriteContext = {
 };
 
 export const COMMUNICATION_DIFFICULTY_LABELS = [
-  "",
+  "未设置",
   "畅通",
   "可沟通",
   "需解释",
@@ -325,7 +330,7 @@ export const COMMUNICATION_DIFFICULTY_LABELS = [
 ] as const;
 
 export const SUPPORT_WILLINGNESS_LABELS = [
-  "",
+  "未设置",
   "暂无行动",
   "偶有行动",
   "提醒后配合",
@@ -784,6 +789,263 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isValidCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return (
+    date.getUTCFullYear() === Number(match[1]) &&
+    date.getUTCMonth() + 1 === Number(match[2]) &&
+    date.getUTCDate() === Number(match[3])
+  );
+}
+
+function isValidInstant(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && Number.isFinite(new Date(value).getTime());
+}
+
+function isValidClock(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
+function isValidTimeZone(value: unknown): value is string {
+  if (!isNonEmptyString(value)) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasUniqueIds(values: readonly unknown[]): boolean {
+  const ids = new Set<string>();
+  for (const value of values) {
+    if (!isRecord(value) || !isNonEmptyString(value.id) || ids.has(value.id)) return false;
+    ids.add(value.id);
+  }
+  return true;
+}
+
+function isHomeSchoolRating(value: unknown): value is HomeSchoolRating {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 5;
+}
+
+function isAssessmentStatus(value: unknown): value is AssessmentStatus {
+  return value === "已核对" || value === "待核对";
+}
+
+function isStudentIssueStatus(value: unknown): value is StudentIssueStatus {
+  return value === "待处理" || value === "观察中" || value === "已缓解";
+}
+
+function isLessonStatus(value: unknown): value is LessonSession["status"] {
+  return value === "待上课" || value === "已完成" || value === "已取消";
+}
+
+function isAssessmentRecordShape(value: unknown): value is AssessmentRecord {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    isNonEmptyString(value.subject) &&
+    isValidCalendarDate(value.occurredOn) &&
+    isFiniteNumber(value.maxScore) && value.maxScore > 0 &&
+    isFiniteNumber(value.score) && value.score >= 0 && value.score <= value.maxScore &&
+    Number.isInteger(value.rank) && Number(value.rank) >= 1 &&
+    Number.isInteger(value.cohortSize) && Number(value.cohortSize) >= Number(value.rank) &&
+    isFiniteNumber(value.classAverage) && value.classAverage >= 0 && value.classAverage <= value.maxScore &&
+    isAssessmentStatus(value.status) &&
+    (value.source === undefined || isAssessmentSource(value.source)) &&
+    (value.verifiedAt === undefined || isValidInstant(value.verifiedAt))
+  );
+}
+
+function isStudentIssueShape(value: unknown): value is StudentIssue {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.title) &&
+    typeof value.detail === "string" &&
+    isNonEmptyString(value.observedOn) &&
+    isStudentIssueStatus(value.status) &&
+    typeof value.nextAction === "string" &&
+    (value.followUpOn === undefined || typeof value.followUpOn === "string")
+  );
+}
+
+function isHomeSchoolProfileShape(value: unknown): value is HomeSchoolProfile {
+  if (!isRecord(value)) return false;
+  return (
+    isHomeSchoolRating(value.communicationDifficulty) &&
+    typeof value.communicationNote === "string" &&
+    isHomeSchoolRating(value.supportWillingness) &&
+    typeof value.supportNote === "string" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isStudentRecordShape(value: unknown): value is StudentRecord {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    isNonEmptyString(value.name) &&
+    isNonEmptyString(value.className) &&
+    typeof value.initials === "string" &&
+    typeof value.color === "string" &&
+    Array.isArray(value.assessments) && hasUniqueIds(value.assessments) && value.assessments.every(isAssessmentRecordShape) &&
+    (value.recentIssue === null || isStudentIssueShape(value.recentIssue)) &&
+    isHomeSchoolProfileShape(value.homeSchool)
+  );
+}
+
+function isLessonSessionShape(value: unknown): value is LessonSession {
+  if (!isRecord(value)) return false;
+  const startsAt = isValidInstant(value.startsAt) ? new Date(value.startsAt).getTime() : Number.NaN;
+  const endsAt = isValidInstant(value.endsAt) ? new Date(value.endsAt).getTime() : Number.NaN;
+  return (
+    isNonEmptyString(value.id) && isNonEmptyString(value.title) &&
+    isNonEmptyString(value.subject) && isNonEmptyString(value.className) &&
+    Number.isFinite(startsAt) && Number.isFinite(endsAt) && endsAt > startsAt &&
+    typeof value.room === "string" && typeof value.preparation === "string" &&
+    isLessonStatus(value.status) &&
+    (value.reminderMinutesBefore === undefined || value.reminderMinutesBefore === null ||
+      (Number.isInteger(value.reminderMinutesBefore) && Number(value.reminderMinutesBefore) >= 1 && Number(value.reminderMinutesBefore) <= MAX_LESSON_REMINDER_MINUTES))
+  );
+}
+
+function isLessonTemplateShape(value: unknown): value is LessonTemplate {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) &&
+    Number.isInteger(value.weekday) && Number(value.weekday) >= 1 && Number(value.weekday) <= 7 &&
+    isValidClock(value.startTime) && isValidClock(value.endTime) && value.endTime > value.startTime &&
+    isNonEmptyString(value.title) && isNonEmptyString(value.subject) &&
+    isNonEmptyString(value.className) && typeof value.room === "string" &&
+    typeof value.preparation === "string" &&
+    (value.reminderMinutesBefore === null ||
+      (Number.isInteger(value.reminderMinutesBefore) && Number(value.reminderMinutesBefore) >= 1 && Number(value.reminderMinutesBefore) <= MAX_LESSON_REMINDER_MINUTES)) &&
+    isValidCalendarDate(value.semesterStart) && isValidCalendarDate(value.semesterEnd) && value.semesterEnd >= value.semesterStart
+  );
+}
+
+function isLessonExceptionShape(value: unknown): value is LessonException {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value.id) || !isNonEmptyString(value.templateId) || !isValidCalendarDate(value.date)) {
+    return false;
+  }
+  if (value.action === "cancel") return true;
+  const hasStart = value.newStartTime !== undefined;
+  const hasEnd = value.newEndTime !== undefined;
+  if (hasStart !== hasEnd) return false;
+  if (hasStart && (!isValidClock(value.newStartTime) || !isValidClock(value.newEndTime) || value.newEndTime <= value.newStartTime)) {
+    return false;
+  }
+  return (
+    value.action === "reschedule" &&
+    (value.newDate === undefined || isValidCalendarDate(value.newDate)) &&
+    (value.newRoom === undefined || typeof value.newRoom === "string") &&
+    (value.newDate !== undefined || hasStart || value.newRoom !== undefined)
+  );
+}
+
+function isTaskShape(value: unknown): value is WorkbenchTask {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) && isTaskCategory(value.category) &&
+    isNonEmptyString(value.title) && isNonEmptyString(value.dueAt) &&
+    isFiniteNumber(value.estimatedMinutes) && value.estimatedMinutes >= 0 &&
+    isTaskStatus(value.status) &&
+    (value.reminderAt === undefined || value.reminderAt === null || typeof value.reminderAt === "string") &&
+    (value.relatedLabel === undefined || typeof value.relatedLabel === "string") &&
+    (value.completedAt === undefined || typeof value.completedAt === "string")
+  );
+}
+
+function isResourceShape(value: unknown): value is WorkbenchResource {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) && isNonEmptyString(value.title) &&
+    (value.kind === "教案" || value.kind === "课件" || value.kind === "练习" || value.kind === "模板" || value.kind === "参考资料") &&
+    typeof value.subject === "string" && typeof value.gradeOrClass === "string" &&
+    typeof value.location === "string" && typeof value.updatedAt === "string"
+  );
+}
+
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || isFiniteNumber(value);
+}
+
+function isWorkbenchSummaryShape(value: unknown): value is WorkbenchSummary {
+  if (!isRecord(value)) return false;
+  const integerKeys: Array<keyof WorkbenchSummary> = [
+    "totalStudents",
+    "studentsWithConfirmedAssessments",
+    "rankImproved",
+    "rankDeclined",
+    "scoreImproved",
+    "scoreDeclined",
+    "issuesPending",
+    "issuesWatching",
+    "homeSchoolFollowUps",
+    "openTasks",
+    "openTaskMinutes",
+    "lessonsOnDate",
+  ];
+  return (
+    integerKeys.every((key) => Number.isInteger(value[key]) && Number(value[key]) >= 0) &&
+    isNullableFiniteNumber(value.averageLatestScoreRate)
+  );
+}
+
+function isMobileStudentSummaryShape(value: unknown): value is MobileStudentSummary {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.id) && isNonEmptyString(value.name) && isNonEmptyString(value.className) &&
+    isNullableFiniteNumber(value.latestScore) && isNullableFiniteNumber(value.latestMaxScore) &&
+    isNullableFiniteNumber(value.currentRank) && isNullableFiniteNumber(value.cohortSize) &&
+    isNullableFiniteNumber(value.scoreDelta) && isNullableFiniteNumber(value.rankDelta) &&
+    (value.issueTitle === null || typeof value.issueTitle === "string") &&
+    (value.issueStatus === null || isStudentIssueStatus(value.issueStatus))
+  );
+}
+
+function isUserConfigurationShape(value: unknown): value is UserConfiguration {
+  if (!isRecord(value) || !isRecord(value.appearance)) return false;
+  return (
+    isNonEmptyString(value.workbenchName) && isNonEmptyString(value.teacherName) &&
+    typeof value.roleLabel === "string" &&
+    (value.schoolStage === "小学" || value.schoolStage === "初中" || value.schoolStage === "高中" || value.schoolStage === "教培") &&
+    Array.isArray(value.subjects) && value.subjects.every((subject) => typeof subject === "string") &&
+    isValidTimeZone(value.timeZone) && value.locale === "zh-CN" && value.weekStartsOn === 1 &&
+    (value.appearance.accent === "松柏绿" || value.appearance.accent === "黛蓝" || value.appearance.accent === "暖橙") &&
+    typeof value.appearance.avatarMark === "string"
+  );
+}
+
+function isMobileSnapshotShape(value: unknown): value is MobileReadOnlySnapshot {
+  if (!isRecord(value)) return false;
+  return (
+    value.snapshotVersion === 1 && value.readOnly === true &&
+    isNonEmptyString(value.snapshotId) && isNonEmptyString(value.generatedAt) &&
+    Number.isInteger(value.sourceRevision) && Number(value.sourceRevision) >= 0 && isNonEmptyString(value.workbenchName) &&
+    (value.accent === "松柏绿" || value.accent === "黛蓝" || value.accent === "暖橙") &&
+    isWorkbenchSummaryShape(value.summary) &&
+    Array.isArray(value.priorityStudents) && value.priorityStudents.every(isMobileStudentSummaryShape) &&
+    Array.isArray(value.upcomingLessons) && value.upcomingLessons.every(isLessonSessionShape) &&
+    Array.isArray(value.openTasks) && value.openTasks.every(isTaskShape)
+  );
+}
+
 function isWorkbenchDataV1(value: unknown): value is WorkbenchDataV1 {
   if (!isRecord(value)) return false;
   if (value.schemaVersion !== WORKBENCH_SCHEMA_VERSION) return false;
@@ -791,10 +1053,40 @@ function isWorkbenchDataV1(value: unknown): value is WorkbenchDataV1 {
   if (!isRecord(value.meta) || !isRecord(value.user)) return false;
   if (!Array.isArray(value.students) || !Array.isArray(value.lessons)) return false;
   if (!Array.isArray(value.tasks) || !Array.isArray(value.resources)) return false;
+  const lessonTemplates = value.lessonTemplates === undefined ? [] : value.lessonTemplates;
+  const lessonExceptions = value.lessonExceptions === undefined ? [] : value.lessonExceptions;
+  if (!Array.isArray(lessonTemplates) || !Array.isArray(lessonExceptions)) return false;
+  if (
+    !hasUniqueIds(value.students) ||
+    !hasUniqueIds(value.lessons) ||
+    !hasUniqueIds(value.tasks) ||
+    !hasUniqueIds(value.resources) ||
+    !hasUniqueIds(lessonTemplates) ||
+    !hasUniqueIds(lessonExceptions)
+  ) {
+    return false;
+  }
+  const templateIds = new Set(
+    lessonTemplates.flatMap((template) => isRecord(template) && isNonEmptyString(template.id) ? [template.id] : []),
+  );
+  const exceptionOccurrences = new Set<string>();
+  for (const exception of lessonExceptions) {
+    if (!isRecord(exception) || !isNonEmptyString(exception.templateId) || !isNonEmptyString(exception.date)) return false;
+    if (!templateIds.has(exception.templateId)) return false;
+    const occurrenceKey = `${exception.templateId}|${exception.date}`;
+    if (exceptionOccurrences.has(occurrenceKey)) return false;
+    exceptionOccurrences.add(occurrenceKey);
+  }
   return (
-    typeof value.meta.revision === "number" &&
-    typeof value.meta.createdAt === "string" &&
-    typeof value.meta.updatedAt === "string"
+    isFiniteNumber(value.meta.revision) && Number.isInteger(value.meta.revision) && value.meta.revision >= 1 &&
+    typeof value.meta.createdAt === "string" && typeof value.meta.updatedAt === "string" &&
+    typeof value.meta.containsDemoData === "boolean" &&
+    isUserConfigurationShape(value.user) &&
+    value.students.every(isStudentRecordShape) && value.lessons.every(isLessonSessionShape) &&
+    value.tasks.every(isTaskShape) && value.resources.every(isResourceShape) &&
+    lessonTemplates.every(isLessonTemplateShape) &&
+    lessonExceptions.every(isLessonExceptionShape) &&
+    (value.mobileSnapshot === null || isMobileSnapshotShape(value.mobileSnapshot))
   );
 }
 
@@ -857,57 +1149,145 @@ function normalizeStoredV1(data: WorkbenchDataV1): WorkbenchDataV1 {
   return normalized;
 }
 
+function isRecognizableLegacyV0(value: Record<string, unknown>): boolean {
+  if (value.schemaVersion === 0) return true;
+  if (Array.isArray(value.students) || Array.isArray(value.tasks) || Array.isArray(value.lessons) || Array.isArray(value.resources)) return true;
+  const legacyUser = isRecord(value.user) ? value.user : isRecord(value.profile) ? value.profile : null;
+  return Boolean(
+    legacyUser &&
+    ("workbenchName" in legacyUser || "workspaceName" in legacyUser || "teacherName" in legacyUser || "name" in legacyUser),
+  );
+}
+
+function legacyRating(value: unknown): HomeSchoolRating {
+  return isHomeSchoolRating(value) ? value : 0;
+}
+
+function legacyAssessment(
+  value: unknown,
+  studentId: string,
+  index: number,
+  fallbackDate: string,
+): AssessmentRecord | null {
+  if (!isRecord(value)) return null;
+  const maxScore = toFiniteNumber(value.maxScore, 100);
+  const score = toFiniteNumber(value.score, Number.NaN);
+  const cohortSize = Math.max(1, Math.floor(toFiniteNumber(value.cohortSize ?? value.classSize, 1)));
+  const rank = Math.min(cohortSize, Math.max(1, Math.floor(toFiniteNumber(value.rank, cohortSize))));
+  if (!Number.isFinite(score) || maxScore <= 0 || score < 0 || score > maxScore) return null;
+  return {
+    id: toStringValue(value.id, `${studentId}-A-MIGRATED-${index + 1}`),
+    title: toStringValue(value.title ?? value.assessmentTitle, `迁移成绩 ${index + 1}`),
+    subject: toStringValue(value.subject, "未标注学科"),
+    occurredOn: toStringValue(value.occurredOn ?? value.date, fallbackDate),
+    maxScore,
+    score,
+    rank,
+    cohortSize,
+    classAverage: toFiniteNumber(value.classAverage, 0),
+    status: isAssessmentStatus(value.status) ? value.status : "已核对",
+    source: isAssessmentSource(value.source) ? value.source : "手工录入",
+    verifiedAt: typeof value.verifiedAt === "string" ? value.verifiedAt : undefined,
+  };
+}
+
 /**
  * Migrates the previous unversioned prototype shape into the current schema.
- * Unknown or missing fields are replaced with a complete seed value while
- * recognizable user configuration and flat score/task data are retained.
+ * It starts from an empty workspace so real legacy records are preserved and
+ * fictional seed records can never be injected into a teacher's restore.
  */
 function migrateLegacyV0(value: Record<string, unknown>, now: string): WorkbenchDataV1 {
-  const seed = createSeedWorkbenchData({ includeMobileSnapshot: false });
+  const seedUser = createSeedWorkbenchData({ includeMobileSnapshot: false }).user;
+  const migrated = createEmptyWorkbenchData(seedUser, now);
   const legacyUser = isRecord(value.user) ? value.user : isRecord(value.profile) ? value.profile : null;
 
   if (legacyUser) {
-    seed.user.workbenchName = toStringValue(
+    migrated.user.workbenchName = toStringValue(
       legacyUser.workbenchName ?? legacyUser.workspaceName,
-      seed.user.workbenchName,
+      migrated.user.workbenchName,
     );
-    seed.user.teacherName = toStringValue(
+    migrated.user.teacherName = toStringValue(
       legacyUser.teacherName ?? legacyUser.name,
-      seed.user.teacherName,
+      migrated.user.teacherName,
     );
-    seed.user.roleLabel = toStringValue(legacyUser.roleLabel ?? legacyUser.role, seed.user.roleLabel);
+    migrated.user.roleLabel = toStringValue(legacyUser.roleLabel ?? legacyUser.role, migrated.user.roleLabel);
+    if (legacyUser.schoolStage === "小学" || legacyUser.schoolStage === "初中" || legacyUser.schoolStage === "高中" || legacyUser.schoolStage === "教培") {
+      migrated.user.schoolStage = legacyUser.schoolStage;
+    }
+    if (Array.isArray(legacyUser.subjects)) {
+      migrated.user.subjects = legacyUser.subjects.filter((subject): subject is string => typeof subject === "string");
+    }
   }
 
   if (Array.isArray(value.students)) {
-    const studentsById = new Map(seed.students.map((student) => [student.id, student]));
-    for (const rawStudent of value.students) {
+    for (const [index, rawStudent] of value.students.entries()) {
       if (!isRecord(rawStudent)) continue;
-      const id = toStringValue(rawStudent.id, "");
-      const student = studentsById.get(id);
-      if (!student) continue;
-
-      student.name = toStringValue(rawStudent.name, student.name);
-      student.className = toStringValue(rawStudent.className, student.className);
-
-      const latest = student.assessments.at(-1);
-      const previous = student.assessments.at(-2);
-      if (latest) {
-        latest.score = toFiniteNumber(rawStudent.score, latest.score);
-        latest.rank = toFiniteNumber(rawStudent.rank, latest.rank);
-        latest.cohortSize = toFiniteNumber(rawStudent.classSize, latest.cohortSize);
-        latest.classAverage = toFiniteNumber(rawStudent.classAverage, latest.classAverage);
+      const name = toStringValue(rawStudent.name, "");
+      const className = toStringValue(rawStudent.className, "");
+      if (!name || !className) continue;
+      const id = toStringValue(rawStudent.id, `S-MIGRATED-${index + 1}`);
+      const fallbackDate = getDeviceLocalDate(now, migrated.user.timeZone);
+      const assessments = Array.isArray(rawStudent.assessments)
+        ? rawStudent.assessments.flatMap((assessment, assessmentIndex) => {
+            const parsed = legacyAssessment(assessment, id, assessmentIndex, fallbackDate);
+            return parsed ? [parsed] : [];
+          })
+        : [];
+      if (assessments.length === 0 && (isFiniteNumber(rawStudent.score) || isFiniteNumber(rawStudent.previousScore))) {
+        if (isFiniteNumber(rawStudent.previousScore)) {
+          const previous = legacyAssessment({
+            title: rawStudent.previousTitle ?? "迁移前次成绩",
+            subject: rawStudent.subject,
+            occurredOn: rawStudent.previousOccurredOn ?? addDaysLocal(fallbackDate, -1),
+            maxScore: rawStudent.maxScore,
+            score: rawStudent.previousScore,
+            rank: rawStudent.previousRank,
+            cohortSize: rawStudent.classSize ?? rawStudent.cohortSize,
+            classAverage: rawStudent.classAverage,
+          }, id, assessments.length, fallbackDate);
+          if (previous) assessments.push(previous);
+        }
+        if (isFiniteNumber(rawStudent.score)) {
+          const latest = legacyAssessment({
+            title: rawStudent.title ?? rawStudent.assessmentTitle ?? "迁移当前成绩",
+            subject: rawStudent.subject,
+            occurredOn: rawStudent.occurredOn ?? fallbackDate,
+            maxScore: rawStudent.maxScore,
+            score: rawStudent.score,
+            rank: rawStudent.rank,
+            cohortSize: rawStudent.classSize ?? rawStudent.cohortSize,
+            classAverage: rawStudent.classAverage,
+          }, id, assessments.length, fallbackDate);
+          if (latest) assessments.push(latest);
+        }
       }
-      if (previous) {
-        previous.score = toFiniteNumber(rawStudent.previousScore, previous.score);
-        previous.rank = toFiniteNumber(rawStudent.previousRank, previous.rank);
-      }
-
-      if (typeof rawStudent.recentIssue === "string" && student.recentIssue) {
-        student.recentIssue.detail = rawStudent.recentIssue;
-      }
-      if (typeof rawStudent.issueNext === "string" && student.recentIssue) {
-        student.recentIssue.nextAction = rawStudent.issueNext;
-      }
+      const rawHomeSchool = isRecord(rawStudent.homeSchool) ? rawStudent.homeSchool : null;
+      const issueText = typeof rawStudent.recentIssue === "string" ? rawStudent.recentIssue : "";
+      migrated.students.push({
+        id,
+        name,
+        className,
+        initials: toStringValue(rawStudent.initials, name.length > 2 ? name.slice(-2) : name),
+        color: toStringValue(rawStudent.color, "sage"),
+        assessments,
+        recentIssue: issueText
+          ? {
+              id: toStringValue(rawStudent.issueId, `${id}-I-MIGRATED`),
+              title: toStringValue(rawStudent.issueTitle, "迁移的近期问题"),
+              detail: issueText,
+              observedOn: toStringValue(rawStudent.observedOn, fallbackDate),
+              status: isStudentIssueStatus(rawStudent.issueStatus) ? rawStudent.issueStatus : "观察中",
+              nextAction: toStringValue(rawStudent.issueNext, "请老师核对并补充下一步。"),
+            }
+          : null,
+        homeSchool: {
+          communicationDifficulty: legacyRating(rawHomeSchool?.communicationDifficulty),
+          communicationNote: typeof rawHomeSchool?.communicationNote === "string" ? rawHomeSchool.communicationNote : "尚未设置。",
+          supportWillingness: legacyRating(rawHomeSchool?.supportWillingness),
+          supportNote: typeof rawHomeSchool?.supportNote === "string" ? rawHomeSchool.supportNote : "尚未设置。",
+          updatedAt: typeof rawHomeSchool?.updatedAt === "string" ? rawHomeSchool.updatedAt : now,
+        },
+      });
     }
   }
 
@@ -935,13 +1315,21 @@ function migrateLegacyV0(value: Record<string, unknown>, now: string): Workbench
         relatedLabel: typeof rawTask.relatedLabel === "string" ? rawTask.relatedLabel : undefined,
       });
     }
-    if (migratedTasks.length > 0) seed.tasks = migratedTasks;
+    migrated.tasks = migratedTasks;
   }
 
-  seed.meta.revision = 1;
-  seed.meta.updatedAt = now;
-  seed.mobileSnapshot = null;
-  return seed;
+  if (Array.isArray(value.lessons)) {
+    migrated.lessons = value.lessons.flatMap((lesson) => isLessonSessionShape(lesson) ? [cloneSerializable(lesson)] : []);
+  }
+  if (Array.isArray(value.resources)) {
+    migrated.resources = value.resources.flatMap((resource) => isResourceShape(resource) ? [cloneSerializable(resource)] : []);
+  }
+  const legacyMeta = isRecord(value.meta) ? value.meta : null;
+  migrated.meta.containsDemoData = legacyMeta?.containsDemoData === true;
+  migrated.meta.revision = 1;
+  migrated.meta.updatedAt = now;
+  migrated.mobileSnapshot = null;
+  return migrated;
 }
 
 function isTaskCategory(value: unknown): value is TaskCategory {
@@ -1034,21 +1422,24 @@ export function createSeedWorkbenchData(options: { includeMobileSnapshot?: boole
 
 export function getAssessmentChange(
   student: Pick<StudentRecord, "assessments">,
-  options: { confirmedOnly?: boolean } = {},
+  options: { confirmedOnly?: boolean; subject?: string } = {},
 ): AssessmentChange {
   const confirmedOnly = options.confirmedOnly !== false;
-  const ordered = student.assessments
+  const eligible = student.assessments
     .filter((assessment) => !confirmedOnly || assessment.status === "已核对")
     .slice()
     .sort((left, right) => {
       const dateOrder = left.occurredOn.localeCompare(right.occurredOn);
       return dateOrder === 0 ? left.id.localeCompare(right.id) : dateOrder;
     });
+  const subject = options.subject ?? eligible.at(-1)?.subject ?? null;
+  const ordered = subject ? eligible.filter((assessment) => assessment.subject === subject) : [];
   const latest = ordered.at(-1) ?? null;
   const previous = ordered.at(-2) ?? null;
 
   if (!latest || !previous) {
     return {
+      subject,
       latest,
       previous,
       scoreDelta: null,
@@ -1061,13 +1452,69 @@ export function getAssessmentChange(
   const previousRate = previous.maxScore > 0 ? (previous.score / previous.maxScore) * 100 : null;
 
   return {
+    subject,
     latest,
     previous,
-    scoreDelta: latest.score - previous.score,
+    scoreDelta: latest.maxScore === previous.maxScore ? latest.score - previous.score : null,
     scoreRateDelta:
       latestRate === null || previousRate === null ? null : roundTo(latestRate - previousRate, 1),
     rankDelta: previous.rank - latest.rank,
   };
+}
+
+export type AssessmentReviewFields = Pick<
+  AssessmentRecord,
+  "title" | "subject" | "occurredOn" | "maxScore" | "score" | "rank" | "cohortSize" | "classAverage"
+>;
+
+export type AssessmentMutationResult =
+  | { ok: true; record: AssessmentRecord }
+  | {
+      ok: false;
+      code: "STUDENT_NOT_FOUND" | "ASSESSMENT_NOT_FOUND" | "INVALID_ASSESSMENT";
+      message: string;
+    };
+
+/** Reviews an existing assessment without changing its identity or provenance. */
+export function reviewAssessmentRecord(
+  draft: WorkbenchData,
+  input: {
+    studentId: string;
+    assessmentId: string;
+    fields: AssessmentReviewFields;
+    decision: "confirm" | "keep-pending";
+    reviewedAt: string;
+  },
+): AssessmentMutationResult {
+  const student = draft.students.find((candidate) => candidate.id === input.studentId);
+  if (!student) return { ok: false, code: "STUDENT_NOT_FOUND", message: "没有找到这名学生。" };
+  const record = student.assessments.find((candidate) => candidate.id === input.assessmentId);
+  if (!record) return { ok: false, code: "ASSESSMENT_NOT_FOUND", message: "没有找到这条成绩记录。" };
+  const next: AssessmentRecord = {
+    ...record,
+    ...input.fields,
+    status: input.decision === "confirm" ? "已核对" : "待核对",
+    verifiedAt: input.decision === "confirm" ? input.reviewedAt : undefined,
+  };
+  if (!isAssessmentRecordShape(next)) {
+    return { ok: false, code: "INVALID_ASSESSMENT", message: "成绩、满分、名次或参考人数不符合范围。" };
+  }
+  Object.assign(record, next);
+  return { ok: true, record };
+}
+
+/** Deletes exactly one selected assessment from a cloned workbench draft. */
+export function deleteAssessmentRecord(
+  draft: WorkbenchData,
+  studentId: string,
+  assessmentId: string,
+): AssessmentMutationResult {
+  const student = draft.students.find((candidate) => candidate.id === studentId);
+  if (!student) return { ok: false, code: "STUDENT_NOT_FOUND", message: "没有找到这名学生。" };
+  const index = student.assessments.findIndex((candidate) => candidate.id === assessmentId);
+  if (index < 0) return { ok: false, code: "ASSESSMENT_NOT_FOUND", message: "没有找到这条成绩记录。" };
+  const [record] = student.assessments.splice(index, 1);
+  return { ok: true, record };
 }
 
 export function rankPriorityStudents(students: readonly StudentRecord[]): StudentPriority[] {
@@ -1101,7 +1548,7 @@ export function rankPriorityStudents(students: readonly StudentRecord[]): Studen
         reasons.push("家长沟通需跟进");
         priorityScore += 14;
       }
-      if (student.homeSchool.supportWillingness <= 2) {
+      if (student.homeSchool.supportWillingness > 0 && student.homeSchool.supportWillingness <= 2) {
         reasons.push("家庭辅助尚未行动");
         priorityScore += 12;
       }
@@ -1169,7 +1616,7 @@ export function summarizeWorkbench(
     homeSchoolFollowUps: data.students.filter(
       (student) =>
         student.homeSchool.communicationDifficulty >= 4 ||
-        student.homeSchool.supportWillingness <= 2,
+        student.homeSchool.supportWillingness > 0 && student.homeSchool.supportWillingness <= 2,
     ).length,
     openTasks: taskDuration.openTaskCount,
     openTaskMinutes: taskDuration.openMinutes,
@@ -1296,13 +1743,23 @@ export function migrateWorkbenchData(
 
   if (isRecord(unpacked)) {
     const version = typeof unpacked.schemaVersion === "number" ? unpacked.schemaVersion : 0;
-    if (version === 0) {
+    if (version === 0 && isRecognizableLegacyV0(unpacked)) {
+      const migrated = migrateLegacyV0(unpacked, now);
+      if (!isWorkbenchDataV1(migrated)) {
+        throw new Error("INVALID_LEGACY_DATA: 早期数据中存在无效或重复的记录，未覆盖当前工作区。");
+      }
       return {
-        data: migrateLegacyV0(unpacked, now),
+        data: normalizeStoredV1(migrated),
         source: "migrated",
         migratedFrom: 0,
         warnings: ["已将早期本地数据转换为当前版本，请核对成绩日期和事项截止时间。"],
       };
+    }
+    if (version === 0) {
+      throw new Error("INVALID_WORKBENCH_DATA: 这不是可识别的教师工作台数据文件。");
+    }
+    if (version === WORKBENCH_SCHEMA_VERSION) {
+      throw new Error("INVALID_WORKBENCH_DATA: 当前版本文件的结构或字段不完整。");
     }
     throw new Error(`UNSUPPORTED_SCHEMA_VERSION: ${version}`);
   }
@@ -1452,6 +1909,8 @@ export function saveDeviceLocalWorkbench(
     access: WorkbenchWriteContext;
     storage?: StorageLike;
     savedAt?: string;
+    /** In-memory state before this save, used to create the very first backup. */
+    previousDataForBackup?: WorkbenchData;
   },
 ): DeviceLocalSaveResult {
   const guard = checkWorkbenchWriteAccess(options.access);
@@ -1484,7 +1943,16 @@ export function saveDeviceLocalWorkbench(
 
   try {
     // Keep the previous version recoverable before overwriting it.
-    rotateDeviceLocalBackup(storage, storage.getItem(WORKBENCH_STORAGE_KEY), savedAt);
+    const storedBeforeSave = storage.getItem(WORKBENCH_STORAGE_KEY);
+    const previousEnvelope = !storedBeforeSave && options.previousDataForBackup
+      ? JSON.stringify({
+          schemaVersion: WORKBENCH_SCHEMA_VERSION,
+          storageKind: WORKBENCH_STORAGE_KIND,
+          savedAt: options.previousDataForBackup.meta.updatedAt,
+          data: normalizeStoredV1(options.previousDataForBackup),
+        } satisfies StoredWorkbenchEnvelopeV1)
+      : null;
+    rotateDeviceLocalBackup(storage, storedBeforeSave ?? previousEnvelope, savedAt);
     storage.setItem(WORKBENCH_STORAGE_KEY, JSON.stringify(envelope));
     return { ok: true, storageKey: WORKBENCH_STORAGE_KEY, savedAt };
   } catch (error) {
@@ -1705,9 +2173,13 @@ export function collectStudentSignals(
 }
 
 /** Rule-based local conclusions for the student detail page (no AI required). */
-export function buildStudentInsights(student: StudentRecord): string[] {
-  const confirmed = confirmedChronological(student);
+export function buildStudentInsights(student: StudentRecord, subject?: string): string[] {
+  const allConfirmed = confirmedChronological(student);
   const insights: string[] = [];
+  const targetSubject = subject ?? allConfirmed.at(-1)?.subject;
+  const confirmed = targetSubject
+    ? allConfirmed.filter((assessment) => assessment.subject === targetSubject)
+    : [];
   if (confirmed.length === 0) return insights;
 
   const rates = confirmed.map(scoreRateOf);
@@ -1725,8 +2197,8 @@ export function buildStudentInsights(student: StudentRecord): string[] {
     if (rates[index] < rates[index - 1]) dropStreak += 1;
     else break;
   }
-  if (riseStreak >= 2) insights.push(`连续 ${riseStreak} 次得分率上升,处于上升通道。`);
-  if (dropStreak >= 2) insights.push(`连续 ${dropStreak} 次得分率下降,建议关注近期学习状态。`);
+  if (riseStreak >= 2) insights.push(`${targetSubject}连续 ${riseStreak} 次得分率上升，处于上升通道。`);
+  if (dropStreak >= 2) insights.push(`${targetSubject}连续 ${dropStreak} 次得分率下降，建议关注近期学习状态。`);
 
   const classAvgRate = latest.maxScore > 0 ? roundTo((latest.classAverage / latest.maxScore) * 100, 1) : null;
   if (classAvgRate !== null) {
@@ -1738,14 +2210,14 @@ export function buildStudentInsights(student: StudentRecord): string[] {
 
   const subjects = getSubjectBreakdown(student);
   if (subjects.length > 1) {
-    insights.push(`相对较弱科目:${subjects.at(-1)!.subject}(得分率 ${subjects.at(-1)!.latestRate})。`);
-    insights.push(`相对优势科目:${subjects[0].subject}(得分率 ${subjects[0].latestRate})。`);
+    insights.push(`相对较弱科目：${subjects.at(-1)!.subject}（得分率 ${subjects.at(-1)!.latestRate}%）。`);
+    insights.push(`相对优势科目：${subjects[0].subject}（得分率 ${subjects[0].latestRate}%）。`);
   }
 
   const spread = roundTo(Math.max(...rates) - Math.min(...rates), 1);
-  if (spread >= 20) insights.push(`历史波动 ${spread} 个百分点,波动偏大,建议观察稳定性。`);
+  if (spread >= 20) insights.push(`${targetSubject}历史波动 ${spread} 个百分点，波动偏大，建议观察稳定性。`);
 
-  const change = getAssessmentChange(student);
+  const change = getAssessmentChange(student, { subject: targetSubject });
   if (change.rankDelta !== null && Math.abs(change.rankDelta) >= 10) {
     insights.push(change.rankDelta > 0 ? `班级排名上升 ${change.rankDelta} 名。` : `班级排名下降 ${Math.abs(change.rankDelta)} 名。`);
   }
@@ -1781,28 +2253,47 @@ export function expandLessonsForRange(
 ): LessonSession[] {
   const templates = data.lessonTemplates ?? [];
   const exceptions = data.lessonExceptions ?? [];
-  const result: LessonSession[] = data.lessons
+  const nowMs = new Date(now).getTime();
+  const result = new Map<string, LessonSession>();
+  data.lessons
     .filter((lesson) => {
       const date = lesson.startsAt.slice(0, 10);
-      return date >= fromDate && date <= toDate;
+      return lesson.status !== "已取消" && date >= fromDate && date <= toDate;
     })
-    .map((lesson) => cloneSerializable(lesson));
+    .forEach((lesson) => {
+      const cloned = cloneSerializable(lesson);
+      const startMs = new Date(cloned.startsAt).getTime();
+      const endMs = new Date(cloned.endsAt).getTime();
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
+      if (cloned.status !== "已取消" && Number.isFinite(endMs) && Number.isFinite(nowMs)) {
+        cloned.status = endMs <= nowMs ? "已完成" : "待上课";
+      }
+      result.set(cloned.id, cloned);
+    });
 
-  for (let date = fromDate; date <= toDate; date = addDaysLocal(date, 1)) {
-    const weekday = weekdayOf(date);
+  const sourceDates = new Set<string>();
+  for (let date = fromDate; date <= toDate; date = addDaysLocal(date, 1)) sourceDates.add(date);
+  for (const exception of exceptions) {
+    if (exception.action === "reschedule" && exception.newDate && exception.newDate >= fromDate && exception.newDate <= toDate) {
+      sourceDates.add(exception.date);
+    }
+  }
+
+  for (const sourceDate of sourceDates) {
+    const weekday = weekdayOf(sourceDate);
     for (const template of templates) {
       if (template.weekday !== weekday) continue;
-      if (date < template.semesterStart || date > template.semesterEnd) continue;
+      if (sourceDate < template.semesterStart || sourceDate > template.semesterEnd) continue;
 
-      const exception = exceptions.find((e) => e.templateId === template.id && e.date === date);
+      const exception = exceptions.findLast((candidate) => candidate.templateId === template.id && candidate.date === sourceDate);
       if (exception?.action === "cancel") continue;
 
-      let sessionDate = date;
+      let sessionDate = sourceDate;
       let startTime = template.startTime;
       let endTime = template.endTime;
       let room = template.room;
       if (exception?.action === "reschedule") {
-        sessionDate = exception.newDate ?? date;
+        sessionDate = exception.newDate ?? sourceDate;
         startTime = exception.newStartTime ?? startTime;
         endTime = exception.newEndTime ?? endTime;
         room = exception.newRoom ?? room;
@@ -1811,8 +2302,11 @@ export function expandLessonsForRange(
 
       const startsAt = `${sessionDate}T${startTime}:00+08:00`;
       const endsAt = `${sessionDate}T${endTime}:00+08:00`;
-      result.push({
-        id: `${template.id}@${date}`,
+      const startMs = new Date(startsAt).getTime();
+      const endMs = new Date(endsAt).getTime();
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
+      const lesson: LessonSession = {
+        id: `${template.id}@${sourceDate}`,
         title: template.title,
         subject: template.subject,
         className: template.className,
@@ -1820,13 +2314,17 @@ export function expandLessonsForRange(
         endsAt,
         room,
         preparation: template.preparation,
-        status: endsAt <= now ? "已完成" : "待上课",
+        status: Number.isFinite(endMs) && Number.isFinite(nowMs) && endMs <= nowMs ? "已完成" : "待上课",
         reminderMinutesBefore: template.reminderMinutesBefore,
-      });
+      };
+      result.set(lesson.id, lesson);
     }
   }
 
-  return result.sort((left, right) => left.startsAt.localeCompare(right.startsAt));
+  return Array.from(result.values()).sort((left, right) => {
+    const timeOrder = left.startsAt.localeCompare(right.startsAt);
+    return timeOrder === 0 ? left.id.localeCompare(right.id) : timeOrder;
+  });
 }
 
 /** Effective lessons on one date (concrete + expanded templates). */
