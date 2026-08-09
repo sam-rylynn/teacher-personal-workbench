@@ -21,7 +21,8 @@ if (!existsSync(vinextCli)) {
 }
 
 const [, , command, ...rest] = process.argv;
-if (!command) {
+const allowedCommands = new Set(["dev", "build", "start"]);
+if (!command || !allowedCommands.has(command)) {
   console.error("用法: node scripts/run-vinext.mjs <dev|build|start> [参数]");
   process.exit(1);
 }
@@ -29,6 +30,11 @@ if (!command) {
 const child = spawn(process.execPath, [vinextCli, command, ...rest], {
   stdio: "inherit",
   env: process.env,
+});
+
+child.on("error", (error) => {
+  console.error(`工作台启动失败：${error.message}`);
+  process.exit(1);
 });
 
 child.on("exit", (code, signal) => {

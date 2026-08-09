@@ -20,14 +20,19 @@ import {
   applyLessonImportPlan,
   buildIcsCalendar,
   computeDueReminders,
+  foldIcsLineUtf8,
   inboxToTasks,
+  loadImportedMobileView,
   parseDelimitedText,
   parseInbox,
+  parseMobileViewFile,
   parseWorkbenchImportText,
   planAssessmentImport,
   planLessonImport,
   serializeInbox,
+  serializeMobileViewFile,
   serializeWorkbenchExport,
+  saveImportedMobileView,
 } from "../app/workbench-transfer.ts";
 
 class MemoryStorage {
@@ -121,6 +126,33 @@ test("applyAssessmentImportPlan creates students and marks records unverified", 
   assert.equal(data.students.length, 8);
 });
 
+test("separate assessment imports in the same second reserve unique ids", () => {
+  const now = "2026-10-12T20:00:00+08:00";
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, now);
+  const header = "姓名,班级,测评,学科,日期,满分,成绩,排名,参考人数,班级均分\n";
+
+  const first = planAssessmentImport(
+    header + "张同学,八年级1班,第一次,数学,2026-10-10,100,80,5,40,75",
+    data.students,
+  );
+  applyAssessmentImportPlan(data, first, now);
+  const second = planAssessmentImport(
+    header + "李同学,八年级2班,第一次,数学,2026-10-10,100,81,4,40,75",
+    data.students,
+  );
+  applyAssessmentImportPlan(data, second, now);
+  const third = planAssessmentImport(
+    header + "张同学,八年级1班,第二次,数学,2026-10-11,100,82,3,40,75",
+    data.students,
+  );
+  applyAssessmentImportPlan(data, third, now);
+
+  assert.deepEqual([first.issues.length, second.issues.length, third.issues.length], [0, 0, 0]);
+  assert.equal(new Set(data.students.map((student) => student.id)).size, data.students.length);
+  const allAssessmentIds = data.students.flatMap((student) => student.assessments.map((assessment) => assessment.id));
+  assert.equal(new Set(allAssessmentIds).size, allAssessmentIds.length);
+});
+
 test("planLessonImport validates times and conflicts", () => {
   const data = createSeedWorkbenchData();
   const valid = planLessonImport(
@@ -155,6 +187,29 @@ test("planLessonImport validates times and conflicts", () => {
   assert.equal(updated.lessons.length, data.lessons.length + 1);
 });
 
+test("separate lesson imports in the same second reserve unique ids", () => {
+  const now = "2026-10-12T20:00:00+08:00";
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, now);
+  const header = "标题,学科,班级,日期,开始,结束,地点,备课,提醒分钟\n";
+
+  const first = planLessonImport(
+    header + "第一节,语文,八年级1班,2026-10-13,08:00,08:45,101,讲义,10",
+    data.lessons,
+  );
+  assert.equal(first.issues.length, 0);
+  assert.equal(applyLessonImportPlan(data, first, now), 1);
+
+  const second = planLessonImport(
+    header + "第二节,数学,八年级2班,2026-10-14,09:00,09:45,202,习题,20",
+    data.lessons,
+  );
+  assert.equal(second.issues.length, 0);
+  assert.equal(applyLessonImportPlan(data, second, now), 1);
+
+  assert.equal(data.lessons.length, 2);
+  assert.equal(new Set(data.lessons.map((lesson) => lesson.id)).size, data.lessons.length);
+});
+
 test("export file round-trips through parseWorkbenchImportText", () => {
   const data = createSeedWorkbenchData();
   const now = "2026-10-12T20:00:00+08:00";
@@ -163,7 +218,13 @@ test("export file round-trips through parseWorkbenchImportText", () => {
   assert.equal(restored.data.students.length, data.students.length);
   assert.equal(restored.data.tasks.length, data.tasks.length);
   assert.equal(restored.data.meta.containsDemoData, true);
-  assert.throws(() => parseWorkbenchImportText("not json", now), /JSON/);
+  assert.throws(() => parseWorkbenchImportText("not json", now), /文件格式无法识别/);
+  assert.throws(() => parseWorkbenchImportText("{}", now), /不是可识别/);
+  assert.throws(() => parseWorkbenchImportText("[]", now), /无法识别/);
+  assert.throws(() => parseWorkbenchImportText('{"schemaVersion":99}', now), /UNSUPPORTED/);
+  const malformed = structuredClone(data);
+  malformed.students[0].assessments[0].score = 9999;
+  assert.throws(() => parseWorkbenchImportText(JSON.stringify(malformed), now), /结构或字段不完整/);
 });
 
 test("every save rotates the previous version into rolling backups", () => {
@@ -191,6 +252,24 @@ test("every save rotates the previous version into rolling backups", () => {
   assert.equal(parsed.storageKind, "device-local");
 });
 
+test("the first save backs up the in-memory previous state", () => {
+  const storage = new MemoryStorage();
+  const previous = createSeedWorkbenchData();
+  const next = createEmptyWorkbenchData(previous.user, "2026-10-01T10:00:00+08:00");
+  const saved = saveDeviceLocalWorkbench(next, {
+    access: DESKTOP_DEVICE_LOCAL_ACCESS,
+    storage,
+    savedAt: "2026-10-01T10:00:00+08:00",
+    previousDataForBackup: previous,
+  });
+  assert.equal(saved.ok, true);
+  const backups = listDeviceLocalBackups(storage);
+  assert.equal(backups.length, 1);
+  const restored = parseWorkbenchImportText(backups[0].payload, "2026-10-01T10:01:00+08:00");
+  assert.equal(restored.data.meta.containsDemoData, true);
+  assert.equal(restored.data.students.length, previous.students.length);
+});
+
 test("ICS calendar contains lessons, open tasks and reminder alarms", () => {
   const data = createSeedWorkbenchData();
   const ics = buildIcsCalendar(data, "2026-10-12T20:00:00+08:00");
@@ -203,7 +282,55 @@ test("ICS calendar contains lessons, open tasks and reminder alarms", () => {
   assert.match(ics, /SUMMARY:八年级4班 班会｜班会：运动会岗位确认/);
   // Completed tasks never appear.
   assert.ok(!ics.includes("提交教研组周计划"));
-  assert.ok(ics.split("\r\n").every((line) => line.length <= 75));
+  assert.ok(ics.split("\r\n").every((line) => Buffer.byteLength(line, "utf8") <= 75));
+});
+
+test("recurring and weekend lessons enter ICS and reminder computation", () => {
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, "2026-09-01T00:00:00+08:00");
+  data.lessonTemplates = [{ id: "WEEKEND", weekday: 7, startTime: "09:00", endTime: "09:45", title: "周日课", subject: "数学", className: "教培1班", room: "教室1", preparation: "练习册", reminderMinutesBefore: 15, semesterStart: "2026-09-01", semesterEnd: "2026-09-30" }];
+  const ics = buildIcsCalendar(data, "2026-09-01T00:00:00+08:00");
+  assert.match(ics, /SUMMARY:教培1班 数学｜周日课/);
+  assert.equal((ics.match(/BEGIN:VEVENT/g) ?? []).length, 4, "September 2026 contains four Sundays");
+  const reminder = computeDueReminders(data, "2026-09-06T08:50:00+08:00", new Set());
+  assert.equal(reminder.length, 1);
+  assert.equal(reminder[0].title, "周日课");
+});
+
+test("ICS folding counts UTF-8 octets and never splits Unicode characters", () => {
+  const folded = foldIcsLineUtf8(`DESCRIPTION:${"中文课堂🙂".repeat(30)}`);
+  const lines = folded.split("\r\n");
+  assert.ok(lines.length > 1);
+  assert.ok(lines.every((line) => Buffer.byteLength(line, "utf8") <= 75));
+  assert.ok(lines.slice(1).every((line) => line.startsWith(" ")));
+  assert.equal(lines.join("").replaceAll(" ", "").includes("�"), false);
+});
+
+test("mobile view files are strict, minimal and stored separately from the workspace", () => {
+  const data = createSeedWorkbenchData();
+  const snapshot = createMobileReadOnlySnapshot(data, "2026-09-16T15:40:00+08:00");
+  const text = serializeMobileViewFile(snapshot, "2026-09-16T15:40:00+08:00");
+  const parsed = parseMobileViewFile(text);
+  assert.deepEqual(parsed.envelope.snapshot, snapshot);
+  assert.ok(!text.includes('"assessments"'));
+  assert.ok(!text.includes('"homeSchool"'));
+  assert.ok(!text.includes('"resources"'));
+  assert.ok(!text.includes('"lessonTemplates"'));
+  assert.throws(() => parseMobileViewFile("{}"), /结构|字段|选择/);
+  const wrongKind = JSON.parse(text);
+  wrongKind.kind = "device-local";
+  assert.throws(() => parseMobileViewFile(JSON.stringify(wrongKind)), /电脑工作台生成/);
+  const writable = JSON.parse(text);
+  writable.snapshot.readOnly = false;
+  assert.throws(() => parseMobileViewFile(JSON.stringify(writable)), /只读标记/);
+  const withUnknown = JSON.parse(text);
+  withUnknown.snapshot.students = [];
+  assert.throws(() => parseMobileViewFile(JSON.stringify(withUnknown)), /不支持的字段/);
+
+  const storage = new MemoryStorage();
+  assert.equal(loadImportedMobileView(storage).snapshot, null);
+  assert.equal(saveImportedMobileView(storage, snapshot).ok, true);
+  assert.equal(storage.getItem("teacher-workbench:device-local:v1"), null);
+  assert.deepEqual(loadImportedMobileView(storage).snapshot, snapshot);
 });
 
 test("computeDueReminders fires inside the reminder window only once", () => {
@@ -227,6 +354,28 @@ test("computeDueReminders fires inside the reminder window only once", () => {
     task.status = "已完成";
   }, "2026-09-16T14:56:00+08:00");
   assert.ok(!computeDueReminders(done, "2026-09-16T14:57:00+08:00", new Set()).some((reminder) => reminder.title.includes("岗位表")));
+});
+
+test("lesson reminders longer than one day fire at the configured time", () => {
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, "2026-09-01T00:00:00+08:00");
+  data.lessons.push({
+    id: "L-LONG-REMINDER",
+    title: "提前两天提醒",
+    subject: "语文",
+    className: "八年级1班",
+    startsAt: "2026-09-10T10:00:00+08:00",
+    endsAt: "2026-09-10T10:45:00+08:00",
+    room: "101",
+    preparation: "讲义",
+    status: "待上课",
+    reminderMinutesBefore: 2880,
+  });
+
+  assert.equal(computeDueReminders(data, "2026-09-08T09:59:00+08:00", new Set()).length, 0);
+  const due = computeDueReminders(data, "2026-09-08T10:00:00+08:00", new Set());
+  assert.equal(due.length, 1);
+  assert.equal(due[0].title, "提前两天提醒");
+  assert.equal(computeDueReminders(data, "2026-09-08T10:01:00+08:00", new Set([due[0].key])).length, 0);
 });
 
 test("device local date and empty workspace support real-data onboarding", () => {
@@ -307,6 +456,32 @@ test("recurring lesson templates expand across the semester with exceptions", ()
   assert.ok(moved);
   assert.equal(moved.startsAt, "2026-09-16T14:00:00+08:00");
   assert.equal(moved.room, "录播室");
+
+  // 跨范围调课：原周不显示，目标周显示一次，ID仍绑定原日期。
+  const crossWeek = applyWorkbenchUpdate(withTemplate, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    draft.lessonExceptions = [{ id: "LE3", templateId: "LT1", date: "2026-09-30", action: "reschedule", newDate: "2026-10-05", newStartTime: "10:00", newEndTime: "10:45" }];
+  }, "2026-09-01T00:00:00+08:00");
+  assert.ok(!expandLessonsForRange(crossWeek, "2026-09-28", "2026-10-04", "2026-09-01T00:00:00Z").some((lesson) => lesson.id === "LT1@2026-09-30"));
+  const targetWeek = expandLessonsForRange(crossWeek, "2026-10-05", "2026-10-11", "2026-09-01T00:00:00Z").filter((lesson) => lesson.id === "LT1@2026-09-30");
+  assert.equal(targetWeek.length, 1);
+  assert.equal(targetWeek[0].startsAt, "2026-10-05T10:00:00+08:00");
+  const crossWeekIcs = buildIcsCalendar(crossWeek, "2026-09-01T00:00:00+08:00");
+  assert.ok(crossWeekIcs.includes("UID:LT1@2026-09-30@teacher-workbench"));
+  assert.ok(crossWeekIcs.includes("DTSTART:20261005T020000Z"), "ICS must include a move beyond semesterEnd");
+  assert.ok(!crossWeekIcs.includes("DTSTART:20260930T000000Z"), "the source occurrence must not remain in ICS");
+
+  // A one-sided time edit must fail validation; expansion also skips such
+  // malformed input defensively if a caller bypasses the transaction guard.
+  assert.throws(() => applyWorkbenchUpdate(withTemplate, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    draft.lessonExceptions = [{ id: "LE-BROKEN", templateId: "LT1", date: "2026-09-16", action: "reschedule", newStartTime: "14:00" }];
+  }, "2026-09-01T00:01:00+08:00"), /INVALID_WORKBENCH_DATA/);
+  const malformedPartialMove = structuredClone(withTemplate);
+  malformedPartialMove.lessonExceptions = [{ id: "LE-BROKEN", templateId: "LT1", date: "2026-09-16", action: "reschedule", newStartTime: "14:00" }];
+  assert.ok(!expandLessonsForRange(malformedPartialMove, "2026-09-16", "2026-09-16", "2026-09-01T00:00:00Z").some((lesson) => lesson.id === "LT1@2026-09-16"));
+
+  // Production passes UTC Z timestamps; completed status must compare instants.
+  const afterClass = expandLessonsForRange(withTemplate, "2026-09-02", "2026-09-02", "2026-09-02T01:00:00Z");
+  assert.equal(afterClass[0].status, "已完成", "09:00 China time is after an 08:45 lesson");
 
   // 当日课次汇总把模板展开算进去
   const summary = summarizeWorkbench(withTemplate, "2026-09-02");
@@ -399,5 +574,5 @@ test("student signals: green streak, red streak, cliff drop, anomaly and maxscor
   const breakdown = getSubjectBreakdown(multi);
   assert.equal(breakdown.length, 2);
   const insights = buildStudentInsights(multi);
-  assert.ok(insights.some((text) => text.includes("相对较弱科目:数学")));
+  assert.ok(insights.some((text) => text.includes("相对较弱科目：数学")));
 });

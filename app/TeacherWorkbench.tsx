@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type SVGProps } from "react";
 import {
   COMMUNICATION_DIFFICULTY_LABELS,
   DESKTOP_DEVICE_LOCAL_ACCESS,
@@ -13,6 +13,7 @@ import {
   createEmptyWorkbenchData,
   createMobileReadOnlySnapshot,
   createSeedWorkbenchData,
+  deleteAssessmentRecord,
   expandLessonsForRange,
   getAssessmentChange,
   getScoreRateSeries,
@@ -21,10 +22,12 @@ import {
   listDeviceLocalBackups,
   loadDeviceLocalWorkbench,
   rankPriorityStudents,
+  reviewAssessmentRecord,
   saveDeviceLocalWorkbench,
   summarizeTaskDuration,
   summarizeWorkbench,
   type AssessmentRecord,
+  type AssessmentReviewFields,
   type AssessmentSource,
   type LessonException,
   type LessonSession,
@@ -41,17 +44,21 @@ import {
 } from "./workbench-data";
 import {
   INBOX_STORAGE_KEY,
+  loadImportedMobileView,
   applyAssessmentImportPlan,
   applyLessonImportPlan,
   buildIcsCalendar,
   computeDueReminders,
   inboxToTasks,
   parseInbox,
+  parseMobileViewFile,
   parseWorkbenchImportText,
   planAssessmentImport,
   planLessonImport,
   readBackupEntry,
+  saveImportedMobileView,
   serializeInbox,
+  serializeMobileViewFile,
   serializeWorkbenchExport,
   type AssessmentImportPlan,
   type InboxItem,
@@ -112,6 +119,7 @@ const navItems = [
 ];
 
 const weekdayLabels = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const DELIVERED_REMINDERS_STORAGE_KEY = "teacher-workbench:delivered-reminders:v1";
 
 function Pill({ children, tone = "neutral" }: { children: ReactNode; tone?: string }) {
   return <span className={`pill pill-${tone}`}>{children}</span>;
@@ -218,7 +226,7 @@ function addDays(dateString: string, amount: number) {
 function getWeekDates(anchorDate: string) {
   const day = new Date(`${anchorDate}T12:00:00+08:00`).getUTCDay();
   const monday = addDays(anchorDate, -((day + 6) % 7));
-  return Array.from({ length: 5 }, (_, index) => addDays(monday, index));
+  return Array.from({ length: 7 }, (_, index) => addDays(monday, index));
 }
 
 export default function TeacherWorkbench() {
@@ -234,6 +242,7 @@ export default function TeacherWorkbench() {
   const [globalQuery, setGlobalQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [studentEditorOpen, setStudentEditorOpen] = useState(false);
+  const [assessmentReviewTarget, setAssessmentReviewTarget] = useState<{ studentId: string; assessmentId: string } | null>(null);
   const [taskEditorOpen, setTaskEditorOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishComplete, setPublishComplete] = useState(false);
@@ -273,10 +282,16 @@ export default function TeacherWorkbench() {
   const selectedStudent = workspace.students.find((student) => student.id === selectedStudentId) ?? workspace.students[0];
   // Effective lessons = concrete + expanded recurring templates (with exceptions).
   const effectiveLessons = useMemo(
-    () => expandLessonsForRange(workspace, addDays(displayDate, -7), addDays(displayDate, 21), new Date().toISOString()),
+    () => expandLessonsForRange(workspace, addDays(displayDate, -30), addDays(displayDate, 180), new Date().toISOString()),
     [workspace, displayDate],
   );
   const selectedLesson = effectiveLessons.find((lesson) => lesson.id === selectedLessonId) ?? workspace.lessons.find((lesson) => lesson.id === selectedLessonId) ?? null;
+  const selectedLessonException = selectedLesson?.id.includes("@")
+    ? (workspace.lessonExceptions ?? []).find((exception) => {
+        const [templateId, occurrenceDate] = selectedLesson.id.split("@");
+        return exception.templateId === templateId && exception.date === occurrenceDate;
+      }) ?? null
+    : null;
   const homeSignals = useMemo(
     () => collectStudentSignals(workspace.students, dismissedSignals, 3),
     [workspace.students, dismissedSignals],
@@ -341,14 +356,21 @@ export default function TeacherWorkbench() {
     const taskResults: SearchResult[] = workspace.tasks
       .filter((task) => `${task.title}${task.category}${task.relatedLabel ?? ""}`.includes(query))
       .map((task) => ({ type: "事项", title: task.title, meta: `${formatDateTime(task.dueAt)} · ${task.relatedLabel ?? "未关联"}`, id: task.id }));
-    const lessonResults: SearchResult[] = workspace.lessons
+    const seenLessonSeries = new Set<string>();
+    const lessonResults: SearchResult[] = effectiveLessons
       .filter((lesson) => `${lesson.title}${lesson.className}${lesson.subject}${lesson.room}`.includes(query))
+      .filter((lesson) => {
+        const seriesKey = lesson.id.includes("@") ? lesson.id.split("@")[0] : lesson.id;
+        if (seenLessonSeries.has(seriesKey)) return false;
+        seenLessonSeries.add(seriesKey);
+        return true;
+      })
       .map((lesson) => ({ type: "课次", title: lesson.title, meta: `${lesson.className} · ${formatDateTime(lesson.startsAt)}`, id: lesson.id }));
     const resourceResults: SearchResult[] = workspace.resources
       .filter((resource) => `${resource.title}${resource.kind}${resource.subject}${resource.gradeOrClass}`.includes(query))
       .map((resource) => ({ type: "资料", title: resource.title, meta: `${resource.kind} · ${resource.gradeOrClass}`, id: resource.id }));
     return [...studentResults, ...taskResults, ...lessonResults, ...resourceResults].slice(0, 8);
-  }, [globalQuery, workspace]);
+  }, [effectiveLessons, globalQuery, workspace]);
 
   // Switching the main view always returns to the content top so the teacher
   // sees the page title and summary instead of a half-scrolled position.
@@ -384,21 +406,23 @@ export default function TeacherWorkbench() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const loaded = loadDeviceLocalWorkbench({ now: new Date().toISOString() });
       const params = new URLSearchParams(locationSearch);
       const isMobileView = params.get("mode") === "mobile" || window.matchMedia("(max-width: 680px)").matches;
       setKeyboardShortcut(/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K");
 
       if (isMobileView) {
-        setMobileContent(loaded.data.mobileSnapshot ?? createMobileReadOnlySnapshot(loaded.data, loaded.data.meta.updatedAt));
+        const loadedMobile = loadImportedMobileView(window.localStorage);
+        setMobileContent(loadedMobile.snapshot);
+        if (loadedMobile.warning) setToast(loadedMobile.warning);
         setAccessMode("mobile");
       } else {
+        const loaded = loadDeviceLocalWorkbench({ now: new Date().toISOString() });
         setWorkspace(loaded.data);
         setMobileContent(loaded.data.mobileSnapshot);
         setAccessMode("desktop");
+        if (loaded.warnings.length) setToast(loaded.warnings[0]);
       }
 
-      if (loaded.warnings.length) setToast(loaded.warnings[0]);
       setLoaded(true);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -420,12 +444,17 @@ export default function TeacherWorkbench() {
   // task reminders as toasts (and system notifications when permitted).
   useEffect(() => {
     if (accessMode !== "desktop") return;
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(DELIVERED_REMINDERS_STORAGE_KEY) ?? "[]") as unknown;
+      if (Array.isArray(stored)) deliveredReminders.current = new Set(stored.filter((key): key is string => typeof key === "string").slice(-300));
+    } catch {
+      deliveredReminders.current = new Set();
+    }
     const check = () => {
       const due = computeDueReminders(workspace, new Date().toISOString(), deliveredReminders.current);
       if (!due.length) return;
       for (const reminder of due) {
         deliveredReminders.current.add(reminder.key);
-        setToast(`${reminder.kind}提醒 · ${reminder.title}:${reminder.message}`);
         if (typeof Notification !== "undefined" && Notification.permission === "granted") {
           try {
             new Notification(`${reminder.kind}提醒 · ${reminder.title}`, { body: reminder.message });
@@ -434,6 +463,12 @@ export default function TeacherWorkbench() {
           }
         }
       }
+      try {
+        window.localStorage.setItem(DELIVERED_REMINDERS_STORAGE_KEY, JSON.stringify([...deliveredReminders.current].slice(-300)));
+      } catch {
+        // 页面内提醒仍然有效。
+      }
+      setToast(due.map((reminder) => `${reminder.kind}提醒 · ${reminder.title}：${reminder.message}`).join("；"));
     };
     const interval = window.setInterval(check, 30_000);
     check();
@@ -451,7 +486,7 @@ export default function TeacherWorkbench() {
     try {
       const now = new Date().toISOString();
       const next = applyWorkbenchUpdate(workspace, access, updater, now);
-      const saved = saveDeviceLocalWorkbench(next, { access, savedAt: now });
+      const saved = saveDeviceLocalWorkbench(next, { access, savedAt: now, previousDataForBackup: workspace });
       if (!saved.ok) {
         setToast(saved.message);
         return null;
@@ -535,6 +570,50 @@ export default function TeacherWorkbench() {
     return Boolean(success);
   }
 
+  function saveAssessmentReview(
+    studentId: string,
+    assessmentId: string,
+    fields: AssessmentReviewFields,
+    decision: "confirm" | "keep-pending",
+  ) {
+    let failure = "";
+    const success = commitWorkspace((draft) => {
+      const result = reviewAssessmentRecord(draft, {
+        studentId,
+        assessmentId,
+        fields,
+        decision,
+        reviewedAt: new Date().toISOString(),
+      });
+      if (!result.ok) failure = result.message;
+    }, decision === "confirm" ? "成绩已核对并计入趋势。" : "成绩修改已保存，仍为待核对。 ");
+    if (failure) {
+      setToast(failure);
+      return false;
+    }
+    if (success) setAssessmentReviewTarget(null);
+    return Boolean(success);
+  }
+
+  function confirmAssessmentRecord(studentId: string, assessmentId: string) {
+    const student = workspace.students.find((candidate) => candidate.id === studentId);
+    const record = student?.assessments.find((candidate) => candidate.id === assessmentId);
+    if (!record) return;
+    const { title, subject, occurredOn, maxScore, score, rank, cohortSize, classAverage } = record;
+    saveAssessmentReview(studentId, assessmentId, { title, subject, occurredOn, maxScore, score, rank, cohortSize, classAverage }, "confirm");
+  }
+
+  function removeAssessment(studentId: string, assessmentId: string) {
+    if (!window.confirm("确认删除这条成绩记录吗？删除后无法从当前页面撤销。")) return;
+    let failure = "";
+    const success = commitWorkspace((draft) => {
+      const result = deleteAssessmentRecord(draft, studentId, assessmentId);
+      if (!result.ok) failure = result.message;
+    }, "成绩记录已删除。 ");
+    if (failure) setToast(failure);
+    return Boolean(success);
+  }
+
   function saveTask(input: NewTaskInput) {
     const success = commitWorkspace((draft) => {
       draft.tasks.push({
@@ -561,15 +640,25 @@ export default function TeacherWorkbench() {
       const now = new Date().toISOString();
       const next = applyWorkbenchUpdate(workspace, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => draft, now);
       next.mobileSnapshot = createMobileReadOnlySnapshot(next, now);
-      const saved = saveDeviceLocalWorkbench(next, { access: DESKTOP_DEVICE_LOCAL_ACCESS, savedAt: now });
+      const saved = saveDeviceLocalWorkbench(next, {
+        access: DESKTOP_DEVICE_LOCAL_ACCESS,
+        savedAt: now,
+        previousDataForBackup: workspace,
+      });
       if (!saved.ok) {
         setToast(saved.message);
         return;
       }
       setWorkspace(next);
       setMobileContent(next.mobileSnapshot);
+      saveImportedMobileView(window.localStorage, next.mobileSnapshot);
+      downloadTextFile(
+        `教师工作台-手机查看-${getDeviceLocalDate(now, workspace.user.timeZone)}.teacher-mobile.json`,
+        serializeMobileViewFile(next.mobileSnapshot, now),
+        "application/json",
+      );
       setPublishComplete(true);
-      setToast("手机看板已更新");
+      setToast("手机查看文件已生成，请传到自己的手机后导入。");
     } catch {
       setToast("手机看板暂时无法更新，请稍后重试。");
     }
@@ -599,6 +688,22 @@ export default function TeacherWorkbench() {
     anchor.download = filename;
     anchor.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function importMobileViewFile(file: File) {
+    try {
+      const result = parseMobileViewFile(await file.text(), mobileContent);
+      if (result.warnings.length && !window.confirm(`${result.warnings.join("\n")}\n\n仍要导入吗？`)) return;
+      const saved = saveImportedMobileView(window.localStorage, result.envelope.snapshot);
+      if (!saved.ok) {
+        setToast(saved.message);
+        return;
+      }
+      setMobileContent(result.envelope.snapshot);
+      setToast("手机查看内容已导入。");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "手机查看文件无法识别。");
+    }
   }
 
   function exportDataFile() {
@@ -642,28 +747,38 @@ export default function TeacherWorkbench() {
 
   function restoreFromBackup(entry: WorkbenchBackupEntry) {
     const now = new Date().toISOString();
-    const result = readBackupEntry(entry, now);
-    const success = commitWorkspace(
-      () => result.data,
-      `已恢复到 ${formatDateTime(entry.savedAt)} 的自动备份。`,
-    );
-    if (success) {
-      setDataManageOpen(false);
-      setSelectedStudentId(result.data.students[0]?.id ?? "");
+    try {
+      const result = readBackupEntry(entry, now);
+      const success = commitWorkspace(
+        () => result.data,
+        `已恢复到 ${formatDateTime(entry.savedAt)} 的自动备份。`,
+      );
+      if (success) {
+        setDataManageOpen(false);
+        setSelectedStudentId(result.data.students[0]?.id ?? "");
+      }
+      return Boolean(success);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "自动备份无法识别，未覆盖当前数据。 ");
+      return false;
     }
-    return Boolean(success);
   }
 
   function importInbox(text: string): number {
     const now = new Date().toISOString();
     const items = parseInbox(text);
     const tasks = inboxToTasks(items, now, workspace.user.timeZone);
+    const newTasks = tasks.filter((task) => !workspace.tasks.some((existing) => existing.id === `T-INBOX-${task.sourceInboxId}`));
+    if (!newTasks.length) {
+      setToast("这些手机速记已经导入过了，没有重复新增。");
+      return 0;
+    }
     const success = commitWorkspace((draft) => {
-      tasks.forEach((task, index) => {
-        draft.tasks.push({ ...task, id: `T-INBOX-${Date.now()}-${index}` });
+      newTasks.forEach(({ sourceInboxId, ...task }) => {
+        draft.tasks.push({ ...task, id: `T-INBOX-${sourceInboxId}` });
       });
-    }, `已把 ${tasks.length} 条手机速记存为待办事项。`);
-    return success ? tasks.length : 0;
+    }, `已把 ${newTasks.length} 条手机速记存为待办事项。`);
+    return success ? newTasks.length : 0;
   }
 
   function saveLessonTemplate(input: Omit<LessonTemplate, "id">) {
@@ -676,8 +791,40 @@ export default function TeacherWorkbench() {
 
   function addLessonException(exception: LessonException) {
     const success = commitWorkspace((draft) => {
-      (draft.lessonExceptions ??= []).push(exception);
+      const exceptions = (draft.lessonExceptions ??= []);
+      const existingIndex = exceptions.findIndex((candidate) => candidate.templateId === exception.templateId && candidate.date === exception.date);
+      if (existingIndex >= 0) exceptions.splice(existingIndex, 1, exception);
+      else exceptions.push(exception);
     }, exception.action === "cancel" ? "本周这节课已取消。" : "本周调课已记录。");
+    if (success) setSelectedLessonId(null);
+    return Boolean(success);
+  }
+
+  function removeConcreteLesson(lessonId: string) {
+    const lesson = workspace.lessons.find((candidate) => candidate.id === lessonId);
+    if (!lesson || !window.confirm(`确认删除“${lesson.title}”这节课吗？`)) return false;
+    const success = commitWorkspace((draft) => {
+      draft.lessons = draft.lessons.filter((candidate) => candidate.id !== lessonId);
+    }, "这节错误课次已删除。");
+    if (success) setSelectedLessonId(null);
+    return Boolean(success);
+  }
+
+  function removeLessonTemplate(templateId: string) {
+    const template = (workspace.lessonTemplates ?? []).find((candidate) => candidate.id === templateId);
+    if (!template || !window.confirm(`确认删除“${template.title}”及它的单次调整吗？`)) return false;
+    const success = commitWorkspace((draft) => {
+      draft.lessonTemplates = (draft.lessonTemplates ?? []).filter((candidate) => candidate.id !== templateId);
+      draft.lessonExceptions = (draft.lessonExceptions ?? []).filter((exception) => exception.templateId !== templateId);
+    }, "重复课次及其单次调整已删除。");
+    if (success) setSelectedLessonId(null);
+    return Boolean(success);
+  }
+
+  function restoreLessonException(exceptionId: string) {
+    const success = commitWorkspace((draft) => {
+      draft.lessonExceptions = (draft.lessonExceptions ?? []).filter((exception) => exception.id !== exceptionId);
+    }, "本次临时调整已撤销，课次恢复为原安排。");
     if (success) setSelectedLessonId(null);
     return Boolean(success);
   }
@@ -715,7 +862,7 @@ export default function TeacherWorkbench() {
 
   function requestNotificationPermission() {
     if (typeof Notification === "undefined") {
-      setToast("当前浏览器不支持系统通知，页面内提醒仍然有效。");
+      setToast("这台设备暂不支持系统通知，页面内提醒仍然有效。");
       return;
     }
     if (Notification.permission === "granted") {
@@ -754,7 +901,9 @@ export default function TeacherWorkbench() {
   }
 
   if (accessMode === "mobile") {
-    return <MobileReadOnlyWorkbench content={mobileContent ?? createSeedWorkbenchData().mobileSnapshot!} />;
+    return mobileContent
+      ? <MobileReadOnlyWorkbench content={mobileContent} onImportFile={importMobileViewFile} />
+      : <MobileSnapshotEmpty onImportFile={importMobileViewFile} message={toast} />;
   }
 
   return (
@@ -794,8 +943,8 @@ export default function TeacherWorkbench() {
         <div className="sidebar-spacer" />
 
         <div className="local-status-card">
-          <div className="status-heading"><span className="status-dot" /> 内容已保存</div>
-          <p>{mobileContent ? `手机内容更新于 ${formatDateTime(mobileContent.generatedAt)}` : "手机看板还没有更新"}</p>
+          <div className="status-heading"><span className="status-dot" /> 本机工作台已就绪</div>
+          <p>{mobileContent ? `手机文件生成于 ${formatDateTime(mobileContent.generatedAt)}` : "还没有生成手机查看文件"}</p>
           <button type="button" className="text-button" onClick={() => setMobilePreviewOpen(true)}>查看手机内容 <span>→</span></button>
           {!readOnly ? <button type="button" className="text-button" onClick={() => setDataManageOpen(true)}>数据与备份 <span>→</span></button> : null}
         </div>
@@ -827,7 +976,7 @@ export default function TeacherWorkbench() {
               <>
                 <button type="button" className="button button-ghost" onClick={() => setMobilePreviewOpen(true)}>查看手机内容</button>
                 <button type="button" className="button button-primary" onClick={() => { setPublishComplete(false); setPublishOpen(true); }}>
-                  <span aria-hidden="true">↻</span> 更新手机看板
+                  <span aria-hidden="true">↓</span> 生成手机查看文件
                 </button>
               </>
             ) : <span className="readonly-badge">正在读取此设备的数据…</span>}
@@ -860,6 +1009,8 @@ export default function TeacherWorkbench() {
               onImportLessons={() => setImportKind("lessons")}
               onExportCalendar={exportCalendarFile}
               onAddTemplate={() => setTemplateModalOpen(true)}
+              onDeleteTemplate={removeLessonTemplate}
+              onRestoreException={restoreLessonException}
               readOnly={readOnly}
             />
           ) : null}
@@ -878,11 +1029,15 @@ export default function TeacherWorkbench() {
               onOpenDetail={openStudentDetail}
               onParentCommunication={(value) => selectedStudent && updateParentRating(selectedStudent.id, "communication", value)}
               onParentSupport={(value) => selectedStudent && updateParentRating(selectedStudent.id, "support", value)}
+              onConfirmAssessment={confirmAssessmentRecord}
+              onEditAssessment={(studentId, assessmentId) => setAssessmentReviewTarget({ studentId, assessmentId })}
+              onDeleteAssessment={removeAssessment}
               readOnly={readOnly}
             />
           ) : null}
           {activeView === "studentDetail" && selectedStudent ? (
             <StudentDetailView
+              key={selectedStudent.id}
               student={selectedStudent}
               readOnly={readOnly}
               onBack={() => setActiveView("students")}
@@ -946,6 +1101,19 @@ export default function TeacherWorkbench() {
           onSave={saveStudentUpdate}
         />
       ) : null}
+      {assessmentReviewTarget ? (() => {
+        const student = workspace.students.find((candidate) => candidate.id === assessmentReviewTarget.studentId);
+        const assessment = student?.assessments.find((candidate) => candidate.id === assessmentReviewTarget.assessmentId);
+        return student && assessment ? (
+          <AssessmentReviewModal
+            student={student}
+            assessment={assessment}
+            onClose={() => setAssessmentReviewTarget(null)}
+            onSave={(fields, decision) => saveAssessmentReview(student.id, assessment.id, fields, decision)}
+            onDelete={() => removeAssessment(student.id, assessment.id)}
+          />
+        ) : null;
+      })() : null}
       {taskEditorOpen ? (
         <NewTaskModal
           demoMode={workspace.meta.containsDemoData}
@@ -953,7 +1121,18 @@ export default function TeacherWorkbench() {
           onSave={saveTask}
         />
       ) : null}
-      {selectedLesson ? <LessonModal lesson={selectedLesson} readOnly={readOnly} onClose={() => setSelectedLessonId(null)} onException={addLessonException} /> : null}
+      {selectedLesson ? (
+        <LessonModal
+          lesson={selectedLesson}
+          activeException={selectedLessonException}
+          readOnly={readOnly}
+          onClose={() => setSelectedLessonId(null)}
+          onException={addLessonException}
+          onDeleteConcrete={removeConcreteLesson}
+          onDeleteTemplate={removeLessonTemplate}
+          onRestoreException={restoreLessonException}
+        />
+      ) : null}
       {templateModalOpen ? (
         <LessonTemplateModal
           defaultSemesterStart={displayDate}
@@ -1146,16 +1325,18 @@ function TodayView({
   );
 }
 
-function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCalendar, onAddTemplate, readOnly }: { data: WorkbenchData; summary: ReturnType<typeof summarizeWorkbench>; onOpenLesson: (id: string) => void; onImportLessons: () => void; onExportCalendar: () => void; onAddTemplate: () => void; readOnly: boolean }) {
+function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCalendar, onAddTemplate, onDeleteTemplate, onRestoreException, readOnly }: { data: WorkbenchData; summary: ReturnType<typeof summarizeWorkbench>; onOpenLesson: (id: string) => void; onImportLessons: () => void; onExportCalendar: () => void; onAddTemplate: () => void; onDeleteTemplate: (id: string) => boolean; onRestoreException: (id: string) => boolean; readOnly: boolean }) {
   const now = new Date().toISOString();
   const today = getDeviceLocalDate(now, data.user.timeZone);
   const anchor = data.meta.containsDemoData ? "2026-09-16" : today;
   const weekDates = getWeekDates(anchor);
-  const weekLessons = expandLessonsForRange(data, weekDates[0], weekDates[4], now);
+  const weekLessons = expandLessonsForRange(data, weekDates[0], weekDates[6], now);
   const timeRows = Array.from(new Set(weekLessons.map((lesson) => lesson.startsAt.slice(11, 16)))).sort();
   const classCount = new Set(weekLessons.map((lesson) => lesson.className)).size;
   const completedLessons = weekLessons.filter((lesson) => lesson.status === "已完成").length;
-  const weekLabel = `${Number(weekDates[0].slice(5, 7))}月${Number(weekDates[0].slice(8, 10))}日—${Number(weekDates[4].slice(5, 7))}月${Number(weekDates[4].slice(8, 10))}日`;
+  const weekLabel = `${Number(weekDates[0].slice(5, 7))}月${Number(weekDates[0].slice(8, 10))}日—${Number(weekDates[6].slice(5, 7))}月${Number(weekDates[6].slice(8, 10))}日`;
+  const lessonTemplates = data.lessonTemplates ?? [];
+  const lessonExceptions = data.lessonExceptions ?? [];
 
   return (
     <>
@@ -1199,17 +1380,39 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
             <div className="schedule-row" role="row" key={time}>
               <span className="schedule-time" role="cell">{time}</span>
               {weekDates.map((date) => {
-                const lesson = weekLessons.find((item) => item.startsAt.slice(0, 10) === date && item.startsAt.slice(11, 16) === time);
-                return lesson ? (
-                  <button type="button" role="cell" key={`${date}-${time}`} onClick={() => onOpenLesson(lesson.id)}>
-                    <strong>{lesson.className}</strong><small>{lesson.subject} · {lesson.room}</small>
-                  </button>
+                const lessons = weekLessons.filter((item) => item.startsAt.slice(0, 10) === date && item.startsAt.slice(11, 16) === time);
+                return lessons.length ? (
+                  <div className="schedule-cell" role="cell" key={`${date}-${time}`}>
+                    {lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => onOpenLesson(lesson.id)}><strong>{lesson.className}</strong><small>{lesson.subject} · {lesson.room}</small></button>)}
+                  </div>
                 ) : <span className="schedule-empty" role="cell" key={`${date}-${time}`}>—</span>;
               })}
             </div>
           ))}
         </div>
         )}
+        {!readOnly && (lessonTemplates.length > 0 || lessonExceptions.length > 0) ? (
+          <details className="schedule-management">
+            <summary>管理重复课次与临时调整</summary>
+            <div className="schedule-management-list">
+              {lessonTemplates.map((template) => (
+                <div className="schedule-management-row" key={template.id}>
+                  <span><strong>{template.title}</strong><small>{template.className} · {weekdayLabels[template.weekday % 7]} {template.startTime}—{template.endTime}</small></span>
+                  <button type="button" className="text-button danger-text" onClick={() => onDeleteTemplate(template.id)}>删除重复课次</button>
+                </div>
+              ))}
+              {lessonExceptions.map((exception) => {
+                const template = lessonTemplates.find((candidate) => candidate.id === exception.templateId);
+                return (
+                  <div className="schedule-management-row" key={exception.id}>
+                    <span><strong>{template?.title ?? "已调整课次"}</strong><small>{exception.date} · {exception.action === "cancel" ? "已取消" : `已调至 ${exception.newDate ?? exception.date}${exception.newStartTime ? ` ${exception.newStartTime}` : ""}`}</small></span>
+                    <button type="button" className="text-button" onClick={() => onRestoreException(exception.id)}>撤销本次调整</button>
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+        ) : null}
       </section>
     </>
   );
@@ -1229,6 +1432,9 @@ function StudentsView({
   onOpenDetail,
   onParentCommunication,
   onParentSupport,
+  onConfirmAssessment,
+  onEditAssessment,
+  onDeleteAssessment,
   readOnly,
 }: {
   filteredStudents: StudentRecord[];
@@ -1244,12 +1450,23 @@ function StudentsView({
   onOpenDetail: (id: string) => void;
   onParentCommunication: (value: 1 | 2 | 3 | 4 | 5) => void;
   onParentSupport: (value: 1 | 2 | 3 | 4 | 5) => void;
+  onConfirmAssessment: (studentId: string, assessmentId: string) => void;
+  onEditAssessment: (studentId: string, assessmentId: string) => void;
+  onDeleteAssessment: (studentId: string, assessmentId: string) => void;
   readOnly: boolean;
 }) {
   const [chartMode, setChartMode] = useState<StudentChartMode>("score");
-  const progress = selectedStudent ? getAssessmentChange(selectedStudent) : null;
-  const assessments = selectedStudent ? selectedStudent.assessments.slice().sort((a, b) => a.occurredOn.localeCompare(b.occurredOn)) : [];
-  const latest = progress?.latest ?? null;
+  const progress = getAssessmentChange(selectedStudent ?? { assessments: [] });
+  const assessments = selectedStudent
+    ? selectedStudent.assessments
+        .filter((assessment) => assessment.status === "已核对" && assessment.subject === progress.subject)
+        .slice()
+        .sort((a, b) => a.occurredOn.localeCompare(b.occurredOn))
+    : [];
+  const pendingAssessments = selectedStudent
+    ? selectedStudent.assessments.filter((assessment) => assessment.status === "待核对").slice().sort((a, b) => b.occurredOn.localeCompare(a.occurredOn))
+    : [];
+  const latest = progress.latest;
   const classes = Array.from(new Set(filteredStudents.map((student) => student.className)));
 
   return (
@@ -1286,7 +1503,7 @@ function StudentsView({
             {filteredStudents.map((student) => {
               const change = getAssessmentChange(student);
               return (
-                <button type="button" key={student.id} className={selectedStudent.id === student.id ? "active" : ""} onClick={() => { onSelect(student.id); onOpenDetail(student.id); }}>
+                <button type="button" key={student.id} className={selectedStudent?.id === student.id ? "active" : ""} onClick={() => onSelect(student.id)}>
                   <Avatar student={student} size="small" />
                   <span><strong>{student.name}</strong><small>{student.className} · {change.latest ? `${change.latest.score}分` : "暂无成绩"}</small></span>
                   <span className={`list-rank-change ${(change.rankDelta ?? 0) >= 0 ? "up" : "down"}`}><strong>{change.latest ? `第${change.latest.rank}` : "—"}</strong><small>{formatChange(change.rankDelta, "")}</small></span>
@@ -1318,15 +1535,29 @@ function StudentsView({
           </div>
 
           <div className="student-performance-grid">
-            <div className="performance-metric"><small>最新成绩 · {latest?.title ?? "暂无"}</small><strong>{latest?.score ?? "—"}<em>{latest ? `/${latest.maxScore}` : ""}</em></strong><span>{latest ? `班级均分 ${latest.classAverage}` : "尚未记录测评"}</span></div>
+            <div className="performance-metric"><small>最新成绩 · {latest ? `${latest.subject} · ${latest.title}` : "暂无"}</small><strong>{latest?.score ?? "—"}<em>{latest ? `/${latest.maxScore}` : ""}</em></strong><span>{latest ? `班级均分 ${latest.classAverage}` : "尚未记录测评"}</span></div>
             <div className="performance-metric"><small>当前班级排名</small><strong>{latest?.rank ?? "—"}<em>{latest ? `/${latest.cohortSize}` : ""}</em></strong><span>{progress.previous ? `上次第 ${progress.previous.rank} 名` : "暂无上次记录"}</span></div>
-            <div className={`performance-metric ${(progress.rankDelta ?? 0) >= 0 ? "positive" : "negative"}`}><small>较上次变化</small><strong>{formatChange(progress.rankDelta, "")}<em> 名</em></strong><span>{progress.scoreDelta === null ? "暂无可比测评" : progress.scoreDelta > 0 ? `分数增加 ${progress.scoreDelta} 分` : progress.scoreDelta < 0 ? `分数减少 ${Math.abs(progress.scoreDelta)} 分` : "分数持平"}</span></div>
+            <div className={`performance-metric ${(progress.rankDelta ?? 0) >= 0 ? "positive" : "negative"}`}><small>较上次变化</small><strong>{formatChange(progress.rankDelta, "")}<em> 名</em></strong><span>{progress.scoreDelta === null ? progress.scoreRateDelta === null ? "暂无同科上次记录" : `得分率${progress.scoreRateDelta > 0 ? "增加" : progress.scoreRateDelta < 0 ? "减少" : "持平"}${progress.scoreRateDelta === 0 ? "" : ` ${Math.abs(progress.scoreRateDelta)} 个百分点`}` : progress.scoreDelta > 0 ? `分数增加 ${progress.scoreDelta} 分` : progress.scoreDelta < 0 ? `分数减少 ${Math.abs(progress.scoreDelta)} 分` : "分数持平"}</span></div>
             <div className="performance-metric issue-metric"><small>近期问题</small><Pill tone={toneForIssue(selectedStudent.recentIssue?.status)}>{selectedStudent.recentIssue?.status ?? "暂无"}</Pill><span>{selectedStudent.recentIssue?.title ?? "当前没有待跟进问题"}</span></div>
           </div>
 
+          {pendingAssessments.length ? (
+            <section className="pending-assessment-panel" aria-label="待核对成绩">
+              <div className="subheading"><div><h3>待核对成绩</h3><p>核对后才会进入成绩趋势、排名变化和手机摘要。</p></div><Pill tone="apricot">{pendingAssessments.length} 条</Pill></div>
+              <div className="pending-assessment-list">
+                {pendingAssessments.map((assessment) => (
+                  <article key={assessment.id}>
+                    <span><strong>{assessment.subject} · {assessment.title}</strong><small>{assessment.occurredOn} · {assessment.score}/{assessment.maxScore} · 第 {assessment.rank}/{assessment.cohortSize}</small></span>
+                    {!readOnly ? <span className="assessment-row-actions"><button type="button" className="button button-soft" onClick={() => onConfirmAssessment(selectedStudent.id, assessment.id)}>核对并计入</button><button type="button" className="text-button" onClick={() => onEditAssessment(selectedStudent.id, assessment.id)}>编辑</button><button type="button" className="text-button danger-text" onClick={() => onDeleteAssessment(selectedStudent.id, assessment.id)}>删除</button></span> : null}
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           <div className="student-dashboard-body">
             <section className="performance-panel">
-              <div className="subheading"><div><h3>成绩与排名动态</h3><p>只展示真实保存的测评记录</p></div><div className="segmented-control compact two-options"><button type="button" className={chartMode === "score" ? "active" : ""} onClick={() => setChartMode("score")}>成绩</button><button type="button" className={chartMode === "rank" ? "active" : ""} onClick={() => setChartMode("rank")}>排名</button></div></div>
+              <div className="subheading"><div><h3>{progress.subject ?? "当前学科"}成绩与排名动态</h3><p>只比较同一学科、已核对的测评记录</p></div><div className="segmented-control compact two-options"><button type="button" className={chartMode === "score" ? "active" : ""} onClick={() => setChartMode("score")}>成绩</button><button type="button" className={chartMode === "rank" ? "active" : ""} onClick={() => setChartMode("rank")}>排名</button></div></div>
               <div className="score-chart" aria-label={`最近${assessments.length}次${chartMode === "score" ? "成绩" : "排名"}变化`}>
                 {chartMode === "score" && latest ? <div className="average-line" style={{ bottom: `${Math.max(12, Math.min(92, latest.classAverage))}%` }}><span>班均 {latest.classAverage}</span></div> : null}
                 {assessments.map((assessment) => {
@@ -1339,9 +1570,11 @@ function StudentsView({
                 <div><span>测评</span><span>成绩</span><span>班级排名</span><span>变化</span></div>
                 {assessments.map((assessment, index) => {
                   const previous = index > 0 ? assessments[index - 1] : null;
-                  const scoreChange = previous ? assessment.score - previous.score : null;
+                  const scoreChange = previous && previous.maxScore === assessment.maxScore ? assessment.score - previous.score : null;
+                  const rateChange = previous ? Math.round((((assessment.score / assessment.maxScore) - (previous.score / previous.maxScore)) * 100) * 10) / 10 : null;
                   const rankChange = previous ? previous.rank - assessment.rank : null;
-                  return <div key={assessment.id}><strong>{assessment.title}<small>{assessment.occurredOn} · {assessment.source}</small></strong><span>{assessment.score}/{assessment.maxScore}</span><span>第 {assessment.rank} / {assessment.cohortSize}</span><span className={(rankChange ?? 0) >= 0 ? "trend-up" : "trend-down"}>{previous ? `${scoreChange! >= 0 ? "+" : ""}${scoreChange}分 · ${formatChange(rankChange, "名")}` : "首次记录"}</span></div>;
+                  const changeLabel = !previous ? "首次记录" : scoreChange === null ? `${(rateChange ?? 0) >= 0 ? "+" : ""}${rateChange} 个百分点 · ${formatChange(rankChange, "名")}` : `${scoreChange >= 0 ? "+" : ""}${scoreChange}分 · ${formatChange(rankChange, "名")}`;
+                  return <div key={assessment.id}><strong>{assessment.title}<small>{assessment.occurredOn} · {assessment.source}</small></strong><span>{assessment.score}/{assessment.maxScore}</span><span>第 {assessment.rank} / {assessment.cohortSize}</span><span className={(rankChange ?? 0) >= 0 ? "trend-up" : "trend-down"}>{changeLabel}{!readOnly ? <span className="assessment-inline-actions"><button type="button" onClick={() => onEditAssessment(selectedStudent.id, assessment.id)}>编辑</button><button type="button" onClick={() => onDeleteAssessment(selectedStudent.id, assessment.id)}>删除</button></span> : null}</span></div>;
                 })}
               </div>
             </section>
@@ -1469,14 +1702,54 @@ function ResourcesView({ resources }: { resources: WorkbenchData["resources"] })
 }
 
 function Modal({ title, subtitle, onClose, children, wide = false }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+
   useEffect(() => {
-    function handleKey(event: KeyboardEvent) { if (event.key === "Escape") onClose(); }
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
+    onCloseRef.current = onClose;
   }, [onClose]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    const focusableSelector = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const firstInput = dialog?.querySelector<HTMLElement>("input:not([disabled]), select:not([disabled]), textarea:not([disabled])");
+    const firstFocusable = dialog?.querySelector<HTMLElement>(focusableSelector);
+    (firstInput ?? firstFocusable ?? dialog)?.focus();
+
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(focusableSelector))
+        .filter((element) => element.getClientRects().length > 0);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("keydown", handleKey);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className={`modal-card ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
+      <section ref={dialogRef} className={`modal-card ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
         <header><div><h2>{title}</h2>{subtitle ? <p>{subtitle}</p> : null}</div><button type="button" className="modal-close" onClick={onClose} aria-label="关闭">×</button></header>
         {children}
       </section>
@@ -1537,13 +1810,16 @@ function StudentUpdateModal({ student, defaultDate, onClose, onSave }: { student
     } else {
       const communicationNote = String(form.get("communicationNote") ?? "").trim();
       const supportNote = String(form.get("supportNote") ?? "").trim();
+      const communicationDifficulty = Number(form.get("communicationDifficulty"));
+      const supportWillingness = Number(form.get("supportWillingness"));
+      if (communicationDifficulty < 1 || communicationDifficulty > 5 || supportWillingness < 1 || supportWillingness > 5) return setError("请由老师选择沟通难度和家长辅助意愿。 ");
       if (!communicationNote || !supportNote) return setError("请分别补充沟通情况和家庭辅助情况。");
       onSave({
         kind,
         studentId: student.id,
-        communicationDifficulty: Number(form.get("communicationDifficulty")) as 1 | 2 | 3 | 4 | 5,
+        communicationDifficulty: communicationDifficulty as 1 | 2 | 3 | 4 | 5,
         communicationNote,
-        supportWillingness: Number(form.get("supportWillingness")) as 1 | 2 | 3 | 4 | 5,
+        supportWillingness: supportWillingness as 1 | 2 | 3 | 4 | 5,
         supportNote,
       });
     }
@@ -1586,8 +1862,8 @@ function StudentUpdateModal({ student, defaultDate, onClose, onSave }: { student
 
         {kind === "homeSchool" ? (
           <div className="form-grid">
-            <label>沟通难度<select name="communicationDifficulty" defaultValue={student.homeSchool.communicationDifficulty}>{COMMUNICATION_DIFFICULTY_LABELS.slice(1).map((label, index) => <option value={index + 1} key={label}>{index + 1} · {label}</option>)}</select></label>
-            <label>家长辅助意愿<select name="supportWillingness" defaultValue={student.homeSchool.supportWillingness}>{SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <option value={index + 1} key={label}>{index + 1} · {label}</option>)}</select></label>
+            <label>沟通难度<select name="communicationDifficulty" defaultValue={student.homeSchool.communicationDifficulty}><option value="0">请选择</option>{COMMUNICATION_DIFFICULTY_LABELS.slice(1).map((label, index) => <option value={index + 1} key={label}>{index + 1} · {label}</option>)}</select></label>
+            <label>家长辅助意愿<select name="supportWillingness" defaultValue={student.homeSchool.supportWillingness}><option value="0">请选择</option>{SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <option value={index + 1} key={label}>{index + 1} · {label}</option>)}</select></label>
             <label className="full-field">沟通情况<textarea name="communicationNote" required defaultValue={student.homeSchool.communicationNote} /></label>
             <label className="full-field">家庭辅助情况<textarea name="supportNote" required defaultValue={student.homeSchool.supportNote} /></label>
           </div>
@@ -1596,6 +1872,66 @@ function StudentUpdateModal({ student, defaultDate, onClose, onSave }: { student
         {error ? <p className="form-error" role="alert">{error}</p> : null}
         <p className="form-note"><span aria-hidden="true">i</span> 家校等级由老师手动选择，只描述当前协同情况。</p>
         <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存更新</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+function AssessmentReviewModal({
+  student,
+  assessment,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  student: StudentRecord;
+  assessment: AssessmentRecord;
+  onClose: () => void;
+  onSave: (fields: AssessmentReviewFields, decision: "confirm" | "keep-pending") => boolean;
+  onDelete: () => boolean | void;
+}) {
+  const [error, setError] = useState("");
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const fields: AssessmentReviewFields = {
+      title: String(form.get("title") ?? "").trim(),
+      subject: String(form.get("subject") ?? "").trim(),
+      occurredOn: String(form.get("occurredOn") ?? ""),
+      maxScore: Number(form.get("maxScore")),
+      score: Number(form.get("score")),
+      rank: Number(form.get("rank")),
+      cohortSize: Number(form.get("cohortSize")),
+      classAverage: Number(form.get("classAverage")),
+    };
+    if (!fields.title || !fields.subject || !fields.occurredOn) return setError("请填写测评名称、学科和日期。 ");
+    if (!Number.isFinite(fields.maxScore) || fields.maxScore <= 0 || !Number.isFinite(fields.score) || fields.score < 0 || fields.score > fields.maxScore) return setError("成绩应在 0 到满分之间。 ");
+    if (!Number.isInteger(fields.rank) || !Number.isInteger(fields.cohortSize) || fields.rank < 1 || fields.cohortSize < fields.rank) return setError("排名应为正整数，且不能大于参考人数。 ");
+    if (!Number.isFinite(fields.classAverage) || fields.classAverage < 0 || fields.classAverage > fields.maxScore) return setError("班级均分应在 0 到满分之间。 ");
+    const decision = form.get("decision") === "confirm" ? "confirm" : "keep-pending";
+    onSave(fields, decision);
+  }
+
+  return (
+    <Modal title={`核对成绩 · ${student.name}`} subtitle={`来源：${assessment.source} · 当前${assessment.status}`} onClose={onClose} wide>
+      <form className="quick-form" onSubmit={submit}>
+        <div className="form-grid">
+          <label>测评名称<input name="title" required defaultValue={assessment.title} /></label>
+          <label>学科<input name="subject" required defaultValue={assessment.subject} /></label>
+          <label>测评日期<input name="occurredOn" type="date" required defaultValue={assessment.occurredOn} /></label>
+          <label>满分<input name="maxScore" type="number" min="1" step="0.1" required defaultValue={assessment.maxScore} /></label>
+          <label>成绩<input name="score" type="number" min="0" step="0.1" required defaultValue={assessment.score} /></label>
+          <label>班级排名<input name="rank" type="number" min="1" step="1" required defaultValue={assessment.rank} /></label>
+          <label>参考人数<input name="cohortSize" type="number" min="1" step="1" required defaultValue={assessment.cohortSize} /></label>
+          <label>班级均分<input name="classAverage" type="number" min="0" step="0.1" required defaultValue={assessment.classAverage} /></label>
+        </div>
+        <p className="form-note"><span aria-hidden="true">i</span> “核对并计入”后才会进入趋势、进退步和手机摘要；继续待核对不会影响正式判断。</p>
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        <div className="modal-actions split-actions">
+          <button type="button" className="text-button danger-text" onClick={() => { if (onDelete()) onClose(); }}>删除记录</button>
+          <span className="modal-action-group"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" name="decision" value="keep-pending" className="button button-soft">保存为待核对</button><button type="submit" name="decision" value="confirm" className="button button-primary">核对并计入</button></span>
+        </div>
       </form>
     </Modal>
   );
@@ -1643,11 +1979,19 @@ function NewTaskModal({ demoMode, onClose, onSave }: { demoMode: boolean; onClos
   );
 }
 
-function LessonModal({ lesson, readOnly, onClose, onException }: { lesson: LessonSession; readOnly?: boolean; onClose: () => void; onException?: (exception: LessonException) => boolean }) {
+function LessonModal({ lesson, activeException, readOnly, onClose, onException, onDeleteConcrete, onDeleteTemplate, onRestoreException }: { lesson: LessonSession; activeException?: LessonException | null; readOnly?: boolean; onClose: () => void; onException?: (exception: LessonException) => boolean; onDeleteConcrete?: (id: string) => boolean; onDeleteTemplate?: (id: string) => boolean; onRestoreException?: (id: string) => boolean }) {
   const [rescheduleOpen, setRescheduleOpen] = useState(false);
+  const rescheduleFormRef = useRef<HTMLFormElement>(null);
+  const rescheduleButtonRef = useRef<HTMLButtonElement>(null);
   const isTemplateOccurrence = lesson.id.includes("@");
   const [templateId, occurrenceDate] = isTemplateOccurrence ? lesson.id.split("@") : ["", ""];
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!rescheduleOpen) return;
+    const frame = window.requestAnimationFrame(() => rescheduleFormRef.current?.querySelector<HTMLElement>("input")?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [rescheduleOpen]);
 
   function submitReschedule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1658,6 +2002,8 @@ function LessonModal({ lesson, readOnly, onClose, onException }: { lesson: Lesso
     const newEndTime = String(form.get("newEndTime") ?? "") || undefined;
     const newRoom = String(form.get("newRoom") ?? "").trim() || undefined;
     if (!newDate && !newStartTime && !newEndTime && !newRoom) return setError("请至少填一项要调整的内容。");
+    if (Boolean(newStartTime) !== Boolean(newEndTime)) return setError("修改时间时，请同时填写新开始和新结束。");
+    if (newStartTime && newEndTime && newEndTime <= newStartTime) return setError("新结束时间应晚于新开始时间。");
     onException({ id: `LE-${Date.now()}`, templateId, date: occurrenceDate, action: "reschedule", newDate, newStartTime, newEndTime, newRoom });
   }
 
@@ -1677,11 +2023,11 @@ function LessonModal({ lesson, readOnly, onClose, onException }: { lesson: Lesso
             <p className="eyebrow">本周调整</p>
             {!rescheduleOpen ? (
               <div className="data-actions-row">
-                <button type="button" className="button button-soft" onClick={() => setRescheduleOpen(true)}>本周调课</button>
+                <button ref={rescheduleButtonRef} type="button" className="button button-soft" onClick={() => setRescheduleOpen(true)}>本周调课</button>
                 <button type="button" className="button button-ghost" onClick={() => onException({ id: `LE-${Date.now()}`, templateId, date: occurrenceDate, action: "cancel" })}>本周取消这节课</button>
               </div>
             ) : (
-              <form className="quick-form exception-form" onSubmit={submitReschedule}>
+              <form ref={rescheduleFormRef} className="quick-form exception-form" onSubmit={submitReschedule}>
                 <div className="form-grid">
                   <label>改到日期<input name="newDate" type="date" /></label>
                   <label>新开始<input name="newStartTime" type="time" /></label>
@@ -1691,7 +2037,7 @@ function LessonModal({ lesson, readOnly, onClose, onException }: { lesson: Lesso
                 {error ? <p className="form-error" role="alert">{error}</p> : null}
                 <div className="data-actions-row">
                   <button type="submit" className="button button-primary">保存调课</button>
-                  <button type="button" className="button button-ghost" onClick={() => setRescheduleOpen(false)}>取消</button>
+                  <button type="button" className="button button-ghost" onClick={() => { setRescheduleOpen(false); window.requestAnimationFrame(() => rescheduleButtonRef.current?.focus()); }}>取消</button>
                 </div>
               </form>
             )}
@@ -1699,7 +2045,16 @@ function LessonModal({ lesson, readOnly, onClose, onException }: { lesson: Lesso
           </section>
         ) : null}
       </div>
-      <div className="modal-actions"><button type="button" className="button button-primary" onClick={onClose}>关闭</button></div>
+      <div className="modal-actions split-actions">
+        {!readOnly ? (
+          <span className="modal-action-group">
+            {!isTemplateOccurrence && onDeleteConcrete ? <button type="button" className="text-button danger-text" onClick={() => onDeleteConcrete(lesson.id)}>删除这节课</button> : null}
+            {isTemplateOccurrence && onDeleteTemplate ? <button type="button" className="text-button danger-text" onClick={() => onDeleteTemplate(templateId)}>删除整个重复课次</button> : null}
+            {activeException && onRestoreException ? <button type="button" className="text-button" onClick={() => onRestoreException(activeException.id)}>撤销本次调整</button> : null}
+          </span>
+        ) : <span />}
+        <button type="button" className="button button-primary" onClick={onClose}>关闭</button>
+      </div>
     </Modal>
   );
 }
@@ -1720,9 +2075,11 @@ function LessonTemplateModal({ defaultSemesterStart, onClose, onSave }: { defaul
     const semesterStart = String(form.get("semesterStart") ?? "");
     const semesterEnd = String(form.get("semesterEnd") ?? "");
     const reminderRaw = String(form.get("reminderMinutesBefore") ?? "");
+    const reminderMinutesBefore = reminderRaw ? Number(reminderRaw) : null;
     if (!title || !subject || !className || !room) return setError("请填写标题、学科、班级和地点。");
     if (!startTime || !endTime || endTime <= startTime) return setError("请填写有效的开始与结束时间。");
     if (!semesterStart || !semesterEnd || semesterEnd < semesterStart) return setError("请填写有效的学期起止日期。");
+    if (reminderMinutesBefore !== null && (!Number.isInteger(reminderMinutesBefore) || reminderMinutesBefore < 1 || reminderMinutesBefore > 10080)) return setError("课前提醒请填写 1 到 10080 分钟的整数。");
     onSave({
       weekday: Number(form.get("weekday")),
       startTime,
@@ -1732,7 +2089,7 @@ function LessonTemplateModal({ defaultSemesterStart, onClose, onSave }: { defaul
       className,
       room,
       preparation: String(form.get("preparation") ?? "").trim() || "按教案准备",
-      reminderMinutesBefore: reminderRaw ? Math.max(1, Number.parseInt(reminderRaw, 10)) : null,
+      reminderMinutesBefore,
       semesterStart,
       semesterEnd,
     });
@@ -1749,7 +2106,7 @@ function LessonTemplateModal({ defaultSemesterStart, onClose, onSave }: { defaul
           <label>开始时间<input name="startTime" type="time" required defaultValue="08:00" /></label>
           <label>结束时间<input name="endTime" type="time" required defaultValue="08:45" /></label>
           <label>地点<input name="room" required placeholder="例如:教学楼 302" /></label>
-          <label>课前提醒（分钟）<input name="reminderMinutesBefore" type="number" min="1" defaultValue="10" /></label>
+          <label>课前提醒（分钟）<input name="reminderMinutesBefore" type="number" min="1" max="10080" step="1" defaultValue="10" /></label>
           <label>学期开始<input name="semesterStart" type="date" required defaultValue={defaultSemesterStart} /></label>
           <label>学期结束<input name="semesterEnd" type="date" required defaultValue={defaultSemesterEnd} /></label>
           <label className="full-field">备课清单<input name="preparation" placeholder="例如:课件、对照片段" /></label>
@@ -1762,17 +2119,18 @@ function LessonTemplateModal({ defaultSemesterStart, onClose, onSave }: { defaul
 }
 
 function MobileUpdateModal({ data, complete, content, localDate, onClose, onUpdate, onPreview }: { data: WorkbenchData; complete: boolean; content: MobileReadOnlySnapshot | null; localDate: string; onClose: () => void; onUpdate: () => void; onPreview: () => void }) {
-  const summary = summarizeWorkbench(data, localDate);
+  const candidate = createMobileReadOnlySnapshot(data, new Date().toISOString(), { localDate });
   return (
-    <Modal title="更新手机看板" subtitle={content ? `手机当前内容更新于 ${formatDateTime(content.generatedAt)}` : "手机看板还没有内容"} onClose={onClose} wide>
+    <Modal title="生成手机查看文件" subtitle={content ? `上次生成于 ${formatDateTime(content.generatedAt)}` : "还没有生成手机查看内容"} onClose={onClose} wide>
       {!complete ? (
         <div className="publish-preview">
-          <div className="snapshot-summary"><div><p className="eyebrow">本次更新内容</p><h3>老师选择过的摘要内容</h3><span>手机只用于查看，不能新增、修改或删除。</span></div><Pill tone="sage">仅供查看</Pill></div>
-          <div className="preview-columns"><div><small>学生</small><strong>{Math.min(5, data.students.length)} 名重点学生</strong><strong>最新成绩与排名</strong><strong>近期关注状态</strong></div><div><small>课表与事项</small><strong>{data.lessons.filter((lesson) => lesson.status === "待上课").length} 节待上课课次</strong><strong>{summary.openTasks} 件未完成事项</strong><strong>不包含附件原文件</strong></div></div>
-          <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="button" className="button button-primary" onClick={onUpdate}>确认更新</button></div>
+          <div className="snapshot-summary"><div><p className="eyebrow">固定摘要范围</p><h3>只导出手机查看所需内容</h3><span>正式工作台数据不能在手机修改；手机速记仍单独保存在手机上。</span></div><Pill tone="sage">只读文件</Pill></div>
+          <div className="preview-columns"><div><small>学生</small><strong>{candidate.priorityStudents.length} 名重点学生（最多 5 名）</strong><strong>最新已核对成绩与排名</strong><strong>近期关注状态</strong></div><div><small>课表与事项</small><strong>{candidate.upcomingLessons.length} 节未来课次（最多 5 节）</strong><strong>{candidate.openTasks.length} 件未完成事项（最多 8 件）</strong><strong>不包含附件和全量档案</strong></div></div>
+          <p className="form-note"><span aria-hidden="true">i</span> 文件含学生姓名与摘要，请只传到老师自己的设备，不要公开上传或转发。</p>
+          <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="button" className="button button-primary" onClick={onUpdate}>生成并下载</button></div>
         </div>
       ) : (
-        <div className="success-state publish-success"><span className="success-mark">✓</span><h3>手机看板已更新</h3><p>手机刷新后即可看到新内容，仍然只能查看。</p><div className="success-buttons"><button type="button" className="button button-ghost" onClick={onClose}>完成</button><button type="button" className="button button-primary" onClick={onPreview}>查看手机内容</button></div></div>
+        <div className="success-state publish-success"><span className="success-mark">✓</span><h3>手机查看文件已下载</h3><p>把文件传到自己的手机，在手机查看页选择“导入新内容”后即可查看。</p><div className="success-buttons"><button type="button" className="button button-ghost" onClick={onClose}>完成</button><button type="button" className="button button-primary" onClick={onPreview}>预览本次内容</button></div></div>
       )}
     </Modal>
   );
@@ -1790,15 +2148,39 @@ function MobilePreview({ content, onClose }: { content: MobileReadOnlySnapshot |
             <section className="phone-hero"><Pill tone="dark">手机看板</Pill><h2>{content ? `还有 ${content.summary.openTasks} 件事\n需要关注` : "还没有可查看的内容"}</h2><p>修改请回到电脑工作台。</p></section>
             {content ? <><section><div className="phone-section-head"><h3>最近事项</h3><span>{content.openTasks.length} 件</span></div>{content.openTasks.slice(0, 3).map((task) => <div className="phone-task" key={task.id}><span className={`phone-task-dot ${task.category}`} /><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · {task.relatedLabel ?? "未关联"}</small></span></div>)}</section><section><div className="phone-section-head"><h3>学生待跟进</h3><span>{content.priorityStudents.length} 人</span></div><div className="phone-students">{content.priorityStudents.slice(0, 4).map((student) => <span key={student.id}><span className="avatar avatar-sage avatar-small">{student.name.slice(-2)}</span><small>{student.name}</small></span>)}</div></section></> : null}
           </main>
-          <div className="phone-static-nav"><span>今日</span><span>学生</span><span>课表</span><span>事项</span></div>
+          <div className="phone-static-nav"><span>今日</span><span>学生</span><span>课表</span><span>事项</span><span>速记</span></div>
         </div>
-        <div className="phone-preview-note"><strong>手机没有编辑入口</strong><p>这里只展示电脑端最近一次更新的内容。</p></div>
+        <div className="phone-preview-note"><strong>手机核心数据没有编辑入口</strong><p>这里只预览本次生成的手机内容；速记单独保存在手机上。</p></div>
       </div>
     </div>
   );
 }
 
-function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot }) {
+function MobileImportButton({ onImportFile, label = "导入新内容" }: { onImportFile: (file: File) => void | Promise<void>; label?: string }) {
+  function pick(event: FormEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (file) void onImportFile(file);
+    input.value = "";
+  }
+  return <label className="button button-soft file-button mobile-import-button">{label}<input type="file" accept="application/json,.json,.teacher-mobile.json" onChange={pick} /></label>;
+}
+
+function MobileSnapshotEmpty({ onImportFile, message }: { onImportFile: (file: File) => void | Promise<void>; message?: string }) {
+  return (
+    <main className="mobile-snapshot-empty">
+      <div className="mobile-empty-mark">师</div>
+      <p className="eyebrow">教师个人工作台</p>
+      <h1>这台手机还没有查看内容</h1>
+      <p>先在电脑点击“生成手机查看文件”，把下载的文件传到这台手机，再从这里导入。</p>
+      <MobileImportButton onImportFile={onImportFile} label="选择手机查看文件" />
+      <div className="mobile-empty-note"><strong>只导入查看摘要</strong><span>不会修改电脑工作台；正式数据仍只能在电脑更新。</span></div>
+      {message ? <p className="form-error" role="status">{message}</p> : null}
+    </main>
+  );
+}
+
+function MobileReadOnlyWorkbench({ content, onImportFile }: { content: MobileReadOnlySnapshot; onImportFile: (file: File) => void | Promise<void> }) {
   const [section, setSection] = useState<"today" | "students" | "teaching" | "tasks" | "capture">("today");
   const [query, setQuery] = useState("");
   const [inbox, setInbox] = useState<InboxItem[]>(() => {
@@ -1837,7 +2219,15 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
   function copyInbox() {
     const payload = serializeInbox(inbox);
     if (navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(payload).then(() => setCaptureMsg("已复制，回家在电脑粘贴导入。"));
+      void navigator.clipboard.writeText(payload)
+        .then(() => setCaptureMsg("已复制，回家在电脑粘贴导入。"))
+        .catch(() => {
+          window.prompt("请长按复制下面的速记内容：", payload);
+          setCaptureMsg("请复制弹窗中的内容，再到电脑导入。");
+        });
+    } else {
+      window.prompt("请长按复制下面的速记内容：", payload);
+      setCaptureMsg("请复制弹窗中的内容，再到电脑导入。");
     }
   }
   const normalized = query.trim();
@@ -1846,7 +2236,7 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
   const tasks = content.openTasks.filter((task) => `${task.title}${task.category}${task.relatedLabel ?? ""}`.includes(normalized));
   return (
     <div className="mobile-readonly-workbench" data-accent={content.accent}>
-      <header className="mobile-readonly-header"><span className="brand-mark">{content.workbenchName.slice(0, 1)}</span><span><strong>{content.workbenchName}</strong><small>手机查看版 · 更新于 {formatDateTime(content.generatedAt)}</small></span><Pill tone="sage">仅供查看</Pill></header>
+      <header className="mobile-readonly-header"><span className="brand-mark">{content.workbenchName.slice(0, 1)}</span><span><strong>{content.workbenchName}</strong><small>手机查看版 · 生成于 {formatDateTime(content.generatedAt)}</small></span><MobileImportButton onImportFile={onImportFile} /></header>
       <label className="mobile-readonly-search"><NavIcon name="search" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、课次或事项" /></label>
       {normalized ? (
         <section className="mobile-search-panel"><h2>搜索结果</h2>{students.map((student) => <button type="button" key={student.id} onClick={() => { setSection("students"); setQuery(""); }}><Pill tone="sage">学生</Pill><span><strong>{student.name}</strong><small>{student.className} · {student.issueTitle ?? "暂无近期关注"}</small></span></button>)}{lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => { setSection("teaching"); setQuery(""); }}><Pill tone="blue">课次</Pill><span><strong>{lesson.title}</strong><small>{lesson.className} · {formatDateTime(lesson.startsAt)}</small></span></button>)}{tasks.map((task) => <button type="button" key={task.id} onClick={() => { setSection("tasks"); setQuery(""); }}><Pill tone="apricot">事项</Pill><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)}</small></span></button>)}{!students.length && !lessons.length && !tasks.length ? <p>没有找到相关内容</p> : null}</section>
@@ -1858,7 +2248,7 @@ function MobileReadOnlyWorkbench({ content }: { content: MobileReadOnlySnapshot 
           {section === "tasks" ? <><SectionHeader eyebrow="按截止时间" title="事项" description="完成和修改请回到电脑。" /><section className="mobile-content-card">{content.openTasks.map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · 约 {formatMinutes(task.estimatedMinutes)}</small><small>{task.relatedLabel ?? "未关联"}</small></article>)}</section></> : null}
           {section === "capture" ? (
             <>
-              <SectionHeader eyebrow="随手记" title="手机速记" description="记在这台手机上,回家在电脑一键导入为事项。" />
+              <SectionHeader eyebrow="随手记" title="手机速记" description="记在这台手机上，回家在电脑一键导入为事项。" />
               <section className="mobile-content-card capture-card">
                 <textarea value={captureText} onChange={(e) => setCaptureText(e.target.value)} placeholder="例如:明天提醒李明澈带阅读单" aria-label="速记内容" />
                 <div className="capture-row">
@@ -2036,7 +2426,7 @@ function DataManageModal({
       return [];
     }
   });
-  const [pendingFile, setPendingFile] = useState<{ name: string; text: string; students: number; lessons: number; tasks: number } | null>(null);
+  const [pendingFile, setPendingFile] = useState<{ name: string; text: string; students: number; lessons: number; tasks: number; warnings: string[] } | null>(null);
   const [fileError, setFileError] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const [inboxText, setInboxText] = useState("");
@@ -2071,6 +2461,7 @@ function DataManageModal({
           students: result.data.students.length,
           lessons: result.data.lessons.length,
           tasks: result.data.tasks.length,
+          warnings: result.warnings,
         });
       } catch (error) {
         setFileError(error instanceof Error ? error.message : "文件无法识别。");
@@ -2100,6 +2491,7 @@ function DataManageModal({
             <div className="restore-preview">
               <p><strong>{pendingFile.name}</strong></p>
               <p>包含 {pendingFile.students} 名学生、{pendingFile.lessons} 节课次、{pendingFile.tasks} 件事项。恢复会覆盖当前工作区，当前版本会自动存入备份。</p>
+              {pendingFile.warnings.length ? <div className="restore-warnings" role="status"><strong>恢复前请注意</strong><ul>{pendingFile.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></div> : null}
               <div className="data-actions-row">
                 <button type="button" className="button button-primary" onClick={() => { if (onRestoreFile(pendingFile.text, pendingFile.name)) setPendingFile(null); }}>确认恢复</button>
                 <button type="button" className="button button-ghost" onClick={() => setPendingFile(null)}>取消</button>
@@ -2370,7 +2762,7 @@ function OnboardingWizard({
                 <div><NavIcon name="students" /><div><strong>每天先做哪三件</strong><small>课次、事项、学生重点自动排好。</small></div></div>
                 <div><NavIcon name="teaching" /><div><strong>课表与备课一站看</strong><small>真实课次对应真实备课清单。</small></div></div>
                 <div><NavIcon name="tasks" /><div><strong>事项不再散落</strong><small>教学、学生、行政、论文一条时间线。</small></div></div>
-                <div><span>↻</span><div><strong>手机只看不改</strong><small>更新一次，手机随时查阅。</small></div></div>
+                <div><span>↻</span><div><strong>手机只看不改</strong><small>导入查看文件后，手机随时查阅。</small></div></div>
               </div>
             ) : null}
 
@@ -2488,10 +2880,11 @@ function StudentDetailView({
   });
   const subjects = getSubjectBreakdown(student);
   const subjectNames = ["全部", ...subjects.map((item) => item.subject)];
-  const points = getScoreRateSeries(student, subject === "全部" ? undefined : subject);
-  const progress = getAssessmentChange(student);
+  const activeSubject = subject === "全部" ? undefined : subject;
+  const points = getScoreRateSeries(student, activeSubject);
+  const progress = getAssessmentChange(student, { subject: activeSubject });
   const latest = progress.latest;
-  const insights = buildStudentInsights(student);
+  const insights = buildStudentInsights(student, activeSubject);
   const signals = analyzeStudentSignals(student);
   const latestRate = latest && latest.maxScore > 0 ? Math.round((latest.score / latest.maxScore) * 1000) / 10 : null;
 
@@ -2506,7 +2899,7 @@ function StudentDetailView({
         <Avatar student={student} size="large" />
         <div className="student-hero-main">
           <div className="name-line"><h1>{student.name}</h1><Pill tone="sage">{student.className}</Pill></div>
-          <p>最近一次测评:{latest ? `${latest.title} · ${latest.occurredOn}` : "暂无"}</p>
+          <p>最近一次测评：{latest ? `${latest.subject} · ${latest.title} · ${latest.occurredOn}` : "暂无"}</p>
         </div>
         <div className="student-hero-metrics">
           <div><small>最新得分率</small><strong>{latestRate ?? "—"}<em>%</em></strong></div>
@@ -2541,7 +2934,7 @@ function StudentDetailView({
 
         <aside className="detail-side">
           <section className="card insights-card">
-            <div className="subheading"><div><h3>统计结论</h3><p>由本地规则计算,AI 建议接入后展示</p></div></div>
+            <div className="subheading"><div><h3>统计结论</h3><p>由本机规则计算，保存前由老师核对。</p></div></div>
             {insights.length ? (
               <ul className="insights-list">
                 {insights.map((insight) => <li key={insight}>{insight}</li>)}
@@ -2550,7 +2943,7 @@ function StudentDetailView({
             {signals.length ? (
               <div className="insight-signals">
                 {signals.map((signal) => (
-                  <p key={signal.key} className={`insight-signal signal-${signal.tone}`}>{signal.title}:{signal.detail}</p>
+                  <p key={signal.key} className={`insight-signal signal-${signal.tone}`}>{signal.title}：{signal.detail}</p>
                 ))}
               </div>
             ) : null}
@@ -2584,9 +2977,9 @@ function StudentDetailView({
 }
 
 
-function NavIcon({ name, className }: { name: "today" | "students" | "teaching" | "tasks" | "resources" | "capture" | "search" }) {
+function NavIcon({ name, ...svgProps }: { name: "today" | "students" | "teaching" | "tasks" | "resources" | "capture" | "search" } & Omit<SVGProps<SVGSVGElement>, "name">) {
   return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...svgProps}>
       {name === "today" && <><path d="M3 10 L3 15 C3 15.6 3.4 16 4 16 L14 16 C14.6 16 15 15.6 15 15 L15 10" /><path d="M1 9 L9 2.5 L17 9" /></>}
       {name === "students" && <><circle cx="9" cy="6.5" r="3" /><path d="M3.5 14 C3.5 11.2 5.9 10 9 10 C12.1 10 14.5 11.2 14.5 14" /></>}
       {name === "teaching" && <><rect x="2" y="3" width="6" height="5.5" rx="1" /><rect x="10" y="3" width="6" height="5.5" rx="1" /><rect x="2" y="10" width="6" height="5.5" rx="1" /><rect x="10" y="10" width="6" height="5.5" rx="1" /></>}
