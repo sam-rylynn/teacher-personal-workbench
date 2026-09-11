@@ -9,6 +9,7 @@
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { recordBuild, sourceFingerprint } from "./build-state.mjs";
 
 process.env.WRANGLER_LOG_PATH = process.env.WRANGLER_LOG_PATH ?? ".wrangler/wrangler.log";
 
@@ -16,7 +17,7 @@ process.env.WRANGLER_LOG_PATH = process.env.WRANGLER_LOG_PATH ?? ".wrangler/wran
 // the project's own node_modules directory instead of package resolution.
 const vinextCli = fileURLToPath(new URL("../node_modules/vinext/dist/cli.js", import.meta.url));
 if (!existsSync(vinextCli)) {
-  console.error("没有找到 vinext,请先在项目目录运行 npm install。");
+  console.error("没有找到运行依赖，请先在项目目录运行 npm ci。");
   process.exit(1);
 }
 
@@ -27,6 +28,7 @@ if (!command || !allowedCommands.has(command)) {
   process.exit(1);
 }
 
+const fingerprint = command === "build" ? await sourceFingerprint() : null;
 const child = spawn(process.execPath, [vinextCli, command, ...rest], {
   stdio: "inherit",
   env: process.env,
@@ -37,10 +39,18 @@ child.on("error", (error) => {
   process.exit(1);
 });
 
-child.on("exit", (code, signal) => {
+child.on("exit", async (code, signal) => {
   if (signal) {
     process.kill(process.pid, signal);
     return;
+  }
+  if (code === 0 && fingerprint) {
+    try {
+      await recordBuild(fingerprint);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "生成运行文件未完成。");
+      process.exit(1);
+    }
   }
   process.exit(code ?? 0);
 });

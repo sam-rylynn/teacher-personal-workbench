@@ -32,6 +32,7 @@ const REQUIRED_FILES = [
   "package-lock.json",
   "package.json",
   "postcss.config.mjs",
+  "scripts/build-state.mjs",
   "scripts/launch-workbench.mjs",
   "scripts/package-release.mjs",
   "scripts/run-vinext.mjs",

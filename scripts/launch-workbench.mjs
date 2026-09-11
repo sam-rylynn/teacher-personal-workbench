@@ -2,6 +2,8 @@
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:net";
+import { hasCurrentBuild } from "./build-state.mjs";
 
 const minimumNode = [22, 13, 0];
 const currentNode = process.versions.node.split(".").map(Number);
@@ -42,20 +44,40 @@ function run(command, args = []) {
   });
 }
 
+function checkHostPort(host) {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", (error) => {
+      if (host === "::1" && ["EADDRNOTAVAIL", "EAFNOSUPPORT"].includes(error.code)) {
+        resolve();
+        return;
+      }
+      reject(new Error(error.code === "EADDRINUSE"
+        ? `端口 ${port} 已被占用。如果工作台已经打开，请直接在浏览器访问 http://localhost:${port}/；否则请先关闭占用该端口的程序。`
+        : `无法使用端口 ${port}，请检查本机的网络设置。`));
+    });
+    probe.listen({ host, port: portNumber, exclusive: true }, () => {
+      probe.close((error) => error ? reject(error) : resolve());
+    });
+  });
+}
+
 try {
   if (!existsSync(new URL("../node_modules/vinext/dist/cli.js", import.meta.url))) {
     throw new Error("尚未安装运行依赖，请先在项目目录执行 npm ci。 ");
   }
-  if (!existsSync(new URL("../dist/server/index.js", import.meta.url))) {
-    if (checkOnly) throw new Error("尚未生成运行文件，请先执行 npm run build。 ");
-    console.log("首次启动需要生成本机运行文件，请稍候……");
+  await checkHostPort("127.0.0.1");
+  await checkHostPort("::1");
+  if (!await hasCurrentBuild()) {
+    if (checkOnly) throw new Error("运行文件尚未生成或代码已更新，请先执行 npm run build。 ");
+    console.log("正在根据当前代码生成运行文件，请稍候……");
     await run("build");
   }
   if (checkOnly) {
     console.log(`启动检查通过：Node.js ${process.versions.node}，端口 ${port} 可用于启动。`);
   } else {
     console.log(`教师工作台将在 http://localhost:${port} 启动。按 Ctrl+C 可以关闭。`);
-    await run("start", ["--port", port]);
+    await run("start", ["--port", port, "--hostname", "localhost"]);
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : "工作台启动失败。 ");
