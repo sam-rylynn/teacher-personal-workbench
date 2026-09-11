@@ -236,11 +236,13 @@ export default function TeacherWorkbench() {
   const [activeView, setActiveView] = useState<ViewKey>("today");
   const [selectedStudentId, setSelectedStudentId] = useState("S08403");
   const [selectedLessonId, setSelectedLessonId] = useState<string | null>(null);
+  const [openedLesson, setOpenedLesson] = useState<LessonSession | null>(null);
   const [studentQuery, setStudentQuery] = useState("");
   const [studentClass, setStudentClass] = useState("全部班级");
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("全部");
   const [globalQuery, setGlobalQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchDialogRef = useDialogFocus(() => setSearchOpen(false), searchOpen);
   const [studentEditorOpen, setStudentEditorOpen] = useState(false);
   const [assessmentReviewTarget, setAssessmentReviewTarget] = useState<{ studentId: string; assessmentId: string } | null>(null);
   const [taskEditorOpen, setTaskEditorOpen] = useState(false);
@@ -264,28 +266,30 @@ export default function TeacherWorkbench() {
   const [toast, setToast] = useState("");
   const [keyboardShortcut, setKeyboardShortcut] = useState("⌘ K");
   const [locationSearch, setLocationSearch] = useState("");
+  const [clockNow, setClockNow] = useState(() => new Date().toISOString());
+  const [storageWarning, setStorageWarning] = useState("");
   const deliveredReminders = useRef<Set<string>>(new Set());
 
   const readOnly = accessMode !== "desktop";
   const deviceToday = useMemo(
-    () => getDeviceLocalDate(new Date(), workspace.user.timeZone),
-    [workspace.user.timeZone],
+    () => getDeviceLocalDate(clockNow, workspace.user.timeZone),
+    [clockNow, workspace.user.timeZone],
   );
   // Demo data is anchored to its fictional date; real data follows the device.
   const displayDate = workspace.meta.containsDemoData ? "2026-09-16" : deviceToday;
+  const displayNow = workspace.meta.containsDemoData ? "2026-09-16T15:40:00+08:00" : clockNow;
   const summary = useMemo(() => summarizeWorkbench(workspace, displayDate), [workspace, displayDate]);
   const completedToday = useMemo(
-    () => workspace.tasks.filter((task) => task.status === "已完成" && task.completedAt && task.completedAt.slice(0, 10) === displayDate).length,
-    [workspace.tasks, displayDate],
+    () => workspace.tasks.filter((task) => task.status === "已完成" && task.completedAt && getDeviceLocalDate(task.completedAt, workspace.user.timeZone) === displayDate).length,
+    [workspace.tasks, workspace.user.timeZone, displayDate],
   );
   const taskSummary = useMemo(() => summarizeTaskDuration(workspace.tasks), [workspace.tasks]);
-  const selectedStudent = workspace.students.find((student) => student.id === selectedStudentId) ?? workspace.students[0];
   // Effective lessons = concrete + expanded recurring templates (with exceptions).
   const effectiveLessons = useMemo(
-    () => expandLessonsForRange(workspace, addDays(displayDate, -30), addDays(displayDate, 180), new Date().toISOString()),
-    [workspace, displayDate],
+    () => expandLessonsForRange(workspace, addDays(displayDate, -30), addDays(displayDate, 180), displayNow),
+    [workspace, displayDate, displayNow],
   );
-  const selectedLesson = effectiveLessons.find((lesson) => lesson.id === selectedLessonId) ?? workspace.lessons.find((lesson) => lesson.id === selectedLessonId) ?? null;
+  const selectedLesson = effectiveLessons.find((lesson) => lesson.id === selectedLessonId) ?? workspace.lessons.find((lesson) => lesson.id === selectedLessonId) ?? (openedLesson?.id === selectedLessonId ? openedLesson : null);
   const selectedLessonException = selectedLesson?.id.includes("@")
     ? (workspace.lessonExceptions ?? []).find((exception) => {
         const [templateId, occurrenceDate] = selectedLesson.id.split("@");
@@ -326,6 +330,20 @@ export default function TeacherWorkbench() {
       return matchesQuery && matchesClass;
     });
   }, [studentClass, studentQuery, workspace.students]);
+  const selectionPool = activeView === "students" ? filteredStudents : workspace.students;
+  const selectedStudent = selectionPool.find((student) => student.id === selectedStudentId) ?? selectionPool[0];
+
+  useEffect(() => {
+    const update = () => setClockNow(new Date().toISOString());
+    const timer = window.setInterval(update, 60_000);
+    window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, []);
 
   const filteredTasks = useMemo(
     () => workspace.tasks
@@ -355,7 +373,7 @@ export default function TeacherWorkbench() {
       });
     const taskResults: SearchResult[] = workspace.tasks
       .filter((task) => `${task.title}${task.category}${task.relatedLabel ?? ""}`.includes(query))
-      .map((task) => ({ type: "事项", title: task.title, meta: `${formatDateTime(task.dueAt)} · ${task.relatedLabel ?? "未关联"}`, id: task.id }));
+      .map((task) => ({ type: "事项", title: task.title, meta: `${formatDateTime(task.dueAt)} · ${task.relatedLabel ?? "未填写学生或班级"}`, id: task.id }));
     const seenLessonSeries = new Set<string>();
     const lessonResults: SearchResult[] = effectiveLessons
       .filter((lesson) => `${lesson.title}${lesson.className}${lesson.subject}${lesson.room}`.includes(query))
@@ -413,14 +431,19 @@ export default function TeacherWorkbench() {
       if (isMobileView) {
         const loadedMobile = loadImportedMobileView(window.localStorage);
         setMobileContent(loadedMobile.snapshot);
-        if (loadedMobile.warning) setToast(loadedMobile.warning);
+        if (loadedMobile.warning) setToast("这台手机上保存的查看内容无法读取，请重新导入电脑生成的文件。");
         setAccessMode("mobile");
       } else {
         const loaded = loadDeviceLocalWorkbench({ now: new Date().toISOString() });
         setWorkspace(loaded.data);
         setMobileContent(loaded.data.mobileSnapshot);
         setAccessMode("desktop");
-        if (loaded.warnings.length) setToast(loaded.warnings[0]);
+        setStorageWarning(loaded.source === "seed" && loaded.warnings.length ? "原有内容暂时无法读取，已暂停保存。请打开“数据与备份”恢复内容；原文件仍被保留。" : "");
+        if (loaded.warnings.length) {
+          setToast(loaded.source === "migrated"
+            ? "已打开旧版工作台数据，请检查成绩日期和事项截止时间。"
+            : "这台电脑上的内容暂时无法读取，已打开演示内容；原内容没有被覆盖。");
+        }
       }
 
       setLoaded(true);
@@ -457,7 +480,7 @@ export default function TeacherWorkbench() {
         deliveredReminders.current.add(reminder.key);
         if (typeof Notification !== "undefined" && Notification.permission === "granted") {
           try {
-            new Notification(`${reminder.kind}提醒 · ${reminder.title}`, { body: reminder.message });
+            new Notification(`${reminder.kind === "课次" ? "上课" : "事项"}提醒 · ${reminder.title}`, { body: reminder.message });
           } catch {
             // Notification construction can fail in some browsers; toast already covers it.
           }
@@ -468,7 +491,7 @@ export default function TeacherWorkbench() {
       } catch {
         // 页面内提醒仍然有效。
       }
-      setToast(due.map((reminder) => `${reminder.kind}提醒 · ${reminder.title}：${reminder.message}`).join("；"));
+      setToast(due.map((reminder) => `${reminder.kind === "课次" ? "上课" : "事项"}提醒 · ${reminder.title}：${reminder.message}`).join("；"));
     };
     const interval = window.setInterval(check, 30_000);
     check();
@@ -477,25 +500,27 @@ export default function TeacherWorkbench() {
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(""), 2800);
+    const timer = window.setTimeout(() => setToast(""), 6500);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  function commitWorkspace(updater: (draft: WorkbenchData) => WorkbenchData | void, successMessage: string) {
+  function commitWorkspace(updater: (draft: WorkbenchData) => WorkbenchData | void, successMessage: string, options: { allowReplaceInvalidStoredData?: boolean } = {}) {
     const access = accessMode === "desktop" ? DESKTOP_DEVICE_LOCAL_ACCESS : MOBILE_READ_ONLY_ACCESS;
     try {
       const now = new Date().toISOString();
       const next = applyWorkbenchUpdate(workspace, access, updater, now);
-      const saved = saveDeviceLocalWorkbench(next, { access, savedAt: now, previousDataForBackup: workspace });
+      const saved = saveDeviceLocalWorkbench(next, { access, savedAt: now, previousDataForBackup: workspace, ...options });
       if (!saved.ok) {
-        setToast(saved.message);
+        if (saved.reason === "invalid-stored-data") setStorageWarning(saved.message);
+        setToast(saved.reason === "invalid-stored-data" || saved.reason === "invalid-data" ? saved.message : "没有保存成功，请检查当前浏览器是否允许保存数据，并确认设备还有可用空间。");
         return null;
       }
       setWorkspace(next);
+      setStorageWarning("");
       setToast(successMessage);
       return next;
     } catch (error) {
-      setToast(error instanceof Error && error.message.includes("READ_ONLY") ? "手机看板仅供查看，请回到电脑更新。" : "本次修改未能保存，请稍后重试。");
+      setToast(error instanceof Error && error.message.includes("READ_ONLY") ? "手机查看只能浏览，请回到电脑更新。" : "本次修改未能保存，请稍后重试。");
       return null;
     }
   }
@@ -522,7 +547,7 @@ export default function TeacherWorkbench() {
       const completing = task.status !== "已完成";
       task.status = completing ? "已完成" : "待开始";
       task.completedAt = completing ? new Date().toISOString() : undefined;
-    }, "事项状态已保存");
+    }, "事项已更新");
   }
 
   function updateParentRating(studentId: string, key: "communication" | "support", value: 1 | 2 | 3 | 4 | 5) {
@@ -532,7 +557,7 @@ export default function TeacherWorkbench() {
       if (key === "communication") student.homeSchool.communicationDifficulty = value;
       else student.homeSchool.supportWillingness = value;
       student.homeSchool.updatedAt = new Date().toISOString();
-    }, "家校协同情况已保存");
+    }, "家校沟通情况已保存");
   }
 
   function saveStudentUpdate(input: StudentUpdateInput) {
@@ -565,7 +590,7 @@ export default function TeacherWorkbench() {
           updatedAt: now,
         };
       }
-    }, input.kind === "assessment" ? "成绩与排名已保存" : input.kind === "issue" ? "近期问题已保存" : "家校协同情况已保存");
+    }, input.kind === "assessment" ? "成绩与排名已保存" : input.kind === "issue" ? "近期问题已保存" : "家校沟通情况已保存");
     if (success) setStudentEditorOpen(false);
     return Boolean(success);
   }
@@ -586,7 +611,7 @@ export default function TeacherWorkbench() {
         reviewedAt: new Date().toISOString(),
       });
       if (!result.ok) failure = result.message;
-    }, decision === "confirm" ? "成绩已核对并计入趋势。" : "成绩修改已保存，仍为待核对。 ");
+    }, decision === "confirm" ? "成绩已确认，变化图已更新。" : "修改已保存，这条成绩稍后再确认。 ");
     if (failure) {
       setToast(failure);
       return false;
@@ -633,13 +658,14 @@ export default function TeacherWorkbench() {
 
   function updateMobileContent() {
     if (accessMode !== "desktop") {
-      setToast("手机看板仅供查看，请回到电脑更新。");
+      setToast("手机查看只能浏览，请回到电脑更新。");
       return;
     }
     try {
       const now = new Date().toISOString();
       const next = applyWorkbenchUpdate(workspace, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => draft, now);
-      next.mobileSnapshot = createMobileReadOnlySnapshot(next, now);
+      next.mobileSnapshot = createMobileReadOnlySnapshot(next, now, { localDate: displayDate, referenceNow: displayNow });
+      const mobileFile = serializeMobileViewFile(next.mobileSnapshot, now);
       const saved = saveDeviceLocalWorkbench(next, {
         access: DESKTOP_DEVICE_LOCAL_ACCESS,
         savedAt: now,
@@ -654,20 +680,20 @@ export default function TeacherWorkbench() {
       saveImportedMobileView(window.localStorage, next.mobileSnapshot);
       downloadTextFile(
         `教师工作台-手机查看-${getDeviceLocalDate(now, workspace.user.timeZone)}.teacher-mobile.json`,
-        serializeMobileViewFile(next.mobileSnapshot, now),
+        mobileFile,
         "application/json",
       );
       setPublishComplete(true);
       setToast("手机查看文件已生成，请传到自己的手机后导入。");
     } catch {
-      setToast("手机看板暂时无法更新，请稍后重试。");
+      setToast("手机查看文件暂时无法生成，请稍后重试。");
     }
   }
 
   function confirmAssessmentImport(plan: AssessmentImportPlan) {
     const success = commitWorkspace((draft) => {
       applyAssessmentImportPlan(draft, plan, new Date().toISOString());
-    }, `已导入 ${plan.entries.length} 条测评记录${plan.newStudentCount ? `，新增 ${plan.newStudentCount} 名学生` : ""}，请逐条核对。`);
+    }, `已导入 ${plan.entries.length} 条成绩${plan.newStudentCount ? `，新增 ${plan.newStudentCount} 名学生` : ""}，请逐条确认。`);
     if (success) setImportKind(null);
     return Boolean(success);
   }
@@ -675,7 +701,7 @@ export default function TeacherWorkbench() {
   function confirmLessonImport(plan: LessonImportPlan) {
     const success = commitWorkspace((draft) => {
       applyLessonImportPlan(draft, plan, new Date().toISOString());
-    }, `已导入 ${plan.entries.length} 节真实课次。`);
+    }, `已导入 ${plan.entries.length} 节课程。`);
     if (success) setImportKind(null);
     return Boolean(success);
   }
@@ -696,13 +722,13 @@ export default function TeacherWorkbench() {
       if (result.warnings.length && !window.confirm(`${result.warnings.join("\n")}\n\n仍要导入吗？`)) return;
       const saved = saveImportedMobileView(window.localStorage, result.envelope.snapshot);
       if (!saved.ok) {
-        setToast(saved.message);
+        setToast("没有保存成功，请检查当前浏览器是否允许保存数据，并确认手机还有可用空间。");
         return;
       }
       setMobileContent(result.envelope.snapshot);
       setToast("手机查看内容已导入。");
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "手机查看文件无法识别。");
+    } catch {
+      setToast("没有导入成功，请重新选择电脑生成的手机查看文件。");
     }
   }
 
@@ -713,7 +739,7 @@ export default function TeacherWorkbench() {
       serializeWorkbenchExport(workspace, now),
       "application/json",
     );
-    setToast("数据文件已导出，请妥善保存。");
+    setToast("完整备份已导出，请妥善保存。");
   }
 
   function exportCalendarFile() {
@@ -732,15 +758,16 @@ export default function TeacherWorkbench() {
       const result = parseWorkbenchImportText(text, now);
       const success = commitWorkspace(
         () => result.data,
-        `已从${sourceLabel}恢复，包含 ${result.data.students.length} 名学生、${result.data.lessons.length} 节课次、${result.data.tasks.length} 件事项。`,
+        `已从${sourceLabel}恢复，包含 ${result.data.students.length} 名学生、${result.data.lessons.length} 节课程、${result.data.tasks.length} 件事项。`,
+        { allowReplaceInvalidStoredData: true },
       );
       if (success) {
         setDataManageOpen(false);
         setSelectedStudentId(result.data.students[0]?.id ?? "");
       }
       return Boolean(success);
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "文件无法识别。");
+    } catch {
+      setToast("这个文件无法恢复，请选择从本工作台导出的完整备份；现有内容没有改变。");
       return false;
     }
   }
@@ -752,14 +779,15 @@ export default function TeacherWorkbench() {
       const success = commitWorkspace(
         () => result.data,
         `已恢复到 ${formatDateTime(entry.savedAt)} 的自动备份。`,
+        { allowReplaceInvalidStoredData: true },
       );
       if (success) {
         setDataManageOpen(false);
         setSelectedStudentId(result.data.students[0]?.id ?? "");
       }
       return Boolean(success);
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "自动备份无法识别，未覆盖当前数据。 ");
+    } catch {
+      setToast("这份自动备份无法恢复，现有内容没有改变。");
       return false;
     }
   }
@@ -784,7 +812,7 @@ export default function TeacherWorkbench() {
   function saveLessonTemplate(input: Omit<LessonTemplate, "id">) {
     const success = commitWorkspace((draft) => {
       (draft.lessonTemplates ??= []).push({ ...input, id: `LT-${Date.now()}` });
-    }, "重复课次已保存，本周起自动进课表。");
+    }, "固定课程已保存，会按填写的学期日期显示在课表中。");
     if (success) setTemplateModalOpen(false);
     return Boolean(success);
   }
@@ -805,7 +833,7 @@ export default function TeacherWorkbench() {
     if (!lesson || !window.confirm(`确认删除“${lesson.title}”这节课吗？`)) return false;
     const success = commitWorkspace((draft) => {
       draft.lessons = draft.lessons.filter((candidate) => candidate.id !== lessonId);
-    }, "这节错误课次已删除。");
+    }, "这节课已删除。");
     if (success) setSelectedLessonId(null);
     return Boolean(success);
   }
@@ -816,7 +844,7 @@ export default function TeacherWorkbench() {
     const success = commitWorkspace((draft) => {
       draft.lessonTemplates = (draft.lessonTemplates ?? []).filter((candidate) => candidate.id !== templateId);
       draft.lessonExceptions = (draft.lessonExceptions ?? []).filter((exception) => exception.templateId !== templateId);
-    }, "重复课次及其单次调整已删除。");
+    }, "这门固定课程及其临时调整已删除。");
     if (success) setSelectedLessonId(null);
     return Boolean(success);
   }
@@ -824,7 +852,7 @@ export default function TeacherWorkbench() {
   function restoreLessonException(exceptionId: string) {
     const success = commitWorkspace((draft) => {
       draft.lessonExceptions = (draft.lessonExceptions ?? []).filter((exception) => exception.id !== exceptionId);
-    }, "本次临时调整已撤销，课次恢复为原安排。");
+    }, "本次临时调整已撤销，这节课恢复为原安排。");
     if (success) setSelectedLessonId(null);
     return Boolean(success);
   }
@@ -902,7 +930,7 @@ export default function TeacherWorkbench() {
 
   if (accessMode === "mobile") {
     return mobileContent
-      ? <MobileReadOnlyWorkbench content={mobileContent} onImportFile={importMobileViewFile} />
+      ? <MobileReadOnlyWorkbench content={mobileContent} onImportFile={importMobileViewFile} message={toast} />
       : <MobileSnapshotEmpty onImportFile={importMobileViewFile} message={toast} />;
   }
 
@@ -943,8 +971,8 @@ export default function TeacherWorkbench() {
         <div className="sidebar-spacer" />
 
         <div className="local-status-card">
-          <div className="status-heading"><span className="status-dot" /> 本机工作台已就绪</div>
-          <p>{mobileContent ? `手机文件生成于 ${formatDateTime(mobileContent.generatedAt)}` : "还没有生成手机查看文件"}</p>
+          <div className="status-heading"><span className="status-dot" /> 工作台可以使用了</div>
+          <p>{mobileContent ? `上次生成手机文件：${formatDateTime(mobileContent.generatedAt)}` : "还没有生成手机查看文件"}</p>
           <button type="button" className="text-button" onClick={() => setMobilePreviewOpen(true)}>查看手机内容 <span>→</span></button>
           {!readOnly ? <button type="button" className="text-button" onClick={() => setDataManageOpen(true)}>数据与备份 <span>→</span></button> : null}
         </div>
@@ -966,7 +994,7 @@ export default function TeacherWorkbench() {
           <div className="search-wrap">
             <button type="button" className="global-search" onClick={() => setSearchOpen(true)} aria-label="打开全局搜索">
               <NavIcon name="search" aria-hidden="true" />
-              <span>搜索学生、课次、事项和资料</span>
+              <span>搜索学生、课程、事项和资料</span>
               <kbd>{keyboardShortcut}</kbd>
             </button>
           </div>
@@ -979,13 +1007,14 @@ export default function TeacherWorkbench() {
                   <span aria-hidden="true">↓</span> 生成手机查看文件
                 </button>
               </>
-            ) : <span className="readonly-badge">正在读取此设备的数据…</span>}
+            ) : <span className="readonly-badge">正在打开工作台…</span>}
           </div>
         </header>
 
         <div className="page-content">
           {activeView === "today" ? (
             <TodayView
+              displayDate={displayDate}
               data={workspace}
               summary={summary}
               completedToday={completedToday}
@@ -994,7 +1023,7 @@ export default function TeacherWorkbench() {
               onDismissSignal={dismissSignal}
               onToggleTask={toggleTask}
               onOpenLesson={setSelectedLessonId}
-              onOpenQuickAdd={() => setStudentEditorOpen(true)}
+              onOpenQuickAdd={() => selectedStudent ? setStudentEditorOpen(true) : setImportKind("assessments")}
               onGoTasks={() => setActiveView("tasks")}
               onGoStudents={() => setActiveView("students")}
               onOpenStudent={openStudentDetail}
@@ -1003,9 +1032,11 @@ export default function TeacherWorkbench() {
           ) : null}
           {activeView === "teaching" ? (
             <TeachingView
+              now={displayNow}
+              displayDate={displayDate}
               data={workspace}
               summary={summary}
-              onOpenLesson={setSelectedLessonId}
+              onOpenLesson={(lesson) => { setOpenedLesson(lesson); setSelectedLessonId(lesson.id); }}
               onImportLessons={() => setImportKind("lessons")}
               onExportCalendar={exportCalendarFile}
               onAddTemplate={() => setTemplateModalOpen(true)}
@@ -1016,6 +1047,7 @@ export default function TeacherWorkbench() {
           ) : null}
           {activeView === "students" ? (
             <StudentsView
+              classes={Array.from(new Set(workspace.students.map((student) => student.className))).sort()}
               filteredStudents={filteredStudents}
               selectedStudent={selectedStudent ?? null}
               summary={summary}
@@ -1072,7 +1104,7 @@ export default function TeacherWorkbench() {
 
       {searchOpen ? (
         <div className="modal-backdrop modal-top" role="presentation" onMouseDown={() => setSearchOpen(false)}>
-          <section className="search-dialog" role="dialog" aria-modal="true" aria-label="全局搜索" onMouseDown={(event) => event.stopPropagation()}>
+          <section ref={searchDialogRef} tabIndex={-1} className="search-dialog" role="dialog" aria-modal="true" aria-label="全局搜索" onMouseDown={(event) => event.stopPropagation()}>
             <div className="search-input-row">
               <NavIcon name="search" aria-hidden="true" />
               <input autoFocus value={globalQuery} onChange={(event) => setGlobalQuery(event.target.value)} placeholder="输入姓名、班级、事项或资料名称" aria-label="搜索关键词" />
@@ -1083,7 +1115,7 @@ export default function TeacherWorkbench() {
                 <div className="search-hint"><strong>可以试试</strong><span>“赵清禾”</span><span>“运动会”</span><span>“课件”</span></div>
               ) : searchResults.length ? searchResults.map((result) => (
                 <button key={`${result.type}-${result.id}`} type="button" onClick={() => selectSearchResult(result)}>
-                  <Pill tone={result.type === "学生" ? "sage" : result.type === "事项" ? "apricot" : result.type === "课次" ? "blue" : "violet"}>{result.type}</Pill>
+                  <Pill tone={result.type === "学生" ? "sage" : result.type === "事项" ? "apricot" : result.type === "课次" ? "blue" : "violet"}>{result.type === "课次" ? "课程" : result.type}</Pill>
                   <span><strong>{result.title}</strong><small>{result.meta}</small></span>
                   <span aria-hidden="true">→</span>
                 </button>
@@ -1096,7 +1128,7 @@ export default function TeacherWorkbench() {
       {studentEditorOpen && selectedStudent ? (
         <StudentUpdateModal
           student={selectedStudent}
-          defaultDate={workspace.meta.containsDemoData ? "2026-09-16" : new Date().toISOString().slice(0, 10)}
+          defaultDate={displayDate}
           onClose={() => setStudentEditorOpen(false)}
           onSave={saveStudentUpdate}
         />
@@ -1146,6 +1178,7 @@ export default function TeacherWorkbench() {
           complete={publishComplete}
           content={mobileContent}
           localDate={displayDate}
+          referenceNow={displayNow}
           onClose={() => setPublishOpen(false)}
           onUpdate={updateMobileContent}
           onPreview={() => { setPublishOpen(false); setMobilePreviewOpen(true); }}
@@ -1184,11 +1217,13 @@ export default function TeacherWorkbench() {
       ) : null}
 
       {toast ? <div className="toast" role="status"><NavIcon name="tasks" />{toast}</div> : null}
+      {storageWarning ? <div className="storage-warning" role="alert"><span>{storageWarning}</span><button type="button" className="button button-soft" onClick={() => setDataManageOpen(true)}>数据与备份</button></div> : null}
     </div>
   );
 }
 
 function TodayView({
+  displayDate,
   data,
   summary,
   completedToday,
@@ -1203,6 +1238,7 @@ function TodayView({
   onOpenStudent,
   readOnly,
 }: {
+  displayDate: string;
   data: WorkbenchData;
   summary: ReturnType<typeof summarizeWorkbench>;
   completedToday: number;
@@ -1226,19 +1262,19 @@ function TodayView({
     const templates = data.lessonTemplates ?? [];
     if (!templates.length) return null;
     const startDate = templates.reduce((earliest, template) => template.semesterStart < earliest ? template.semesterStart : earliest, templates[0].semesterStart);
-    const diffWeeks = Math.floor((new Date(`${data.meta.updatedAt.slice(0, 10)}T12:00:00+08:00`).getTime() - new Date(`${startDate}T12:00:00+08:00`).getTime()) / (86400000 * 7)) + 1;
+    const diffWeeks = Math.floor((new Date(`${displayDate}T12:00:00+08:00`).getTime() - new Date(`${startDate}T12:00:00+08:00`).getTime()) / (86400000 * 7)) + 1;
     return diffWeeks > 0 ? `第 ${diffWeeks} 周` : null;
-  }, [data.lessonTemplates, data.meta.updatedAt]);
+  }, [data.lessonTemplates, displayDate]);
 
   return (
     <>
       <SectionHeader
-        eyebrow={`${formatFullDate(nextLesson?.startsAt ?? data.meta.updatedAt)}${semesterWeek ? ` · ${semesterWeek}` : ""}`}
-        title={`下午好，${data.user.teacherName}`}
+        eyebrow={`${formatFullDate(`${displayDate}T12:00:00+08:00`)}${semesterWeek ? ` · ${semesterWeek}` : ""}${data.meta.containsDemoData ? " · 演示日期" : ""}`}
+        title={`你好，${data.user.teacherName}`}
         description={openTasks.length === 0
           ? "今天的事都做完啦，辛苦了。"
           : completedToday > 0
-            ? `今天已完成 ${completedToday} 件，还有 ${summary.openTasks} 件，先做最紧急的三件。`
+            ? `今天已完成 ${completedToday} 件，目前还有 ${summary.openTasks} 件未完成，先做最紧急的三件。`
             : `还有 ${summary.openTasks} 件未完成事项，先做最紧急的三件。`}
       />
 
@@ -1261,7 +1297,7 @@ function TodayView({
         {nextLesson ? (
           <button type="button" className="next-lesson-card" onClick={() => onOpenLesson(nextLesson.id)}>
             <div className="next-lesson-top"><Pill tone="dark">下一节</Pill><span>{formatFullDate(nextLesson.startsAt)}</span></div>
-            <div className="lesson-time-block"><span className="time-large">{formatTime(nextLesson.startsAt)}—{formatTime(nextLesson.endsAt)}</span><span className="time-duration">课前 {nextLesson.reminderMinutesBefore ?? 0} 分钟提醒</span></div>
+            <div className="lesson-time-block"><span className="time-large">{formatTime(nextLesson.startsAt)}—{formatTime(nextLesson.endsAt)}</span><span className="time-duration">{nextLesson.reminderMinutesBefore === null ? "未设置课前提醒" : `课前 ${nextLesson.reminderMinutesBefore} 分钟提醒`}</span></div>
             <div className="lesson-main-copy">
               <p>{nextLesson.className} · {nextLesson.subject}</p>
               <h2>{nextLesson.title}</h2>
@@ -1303,11 +1339,11 @@ function TodayView({
             <div><p className="eyebrow">学生重点</p><h2>成绩、排名与近期动态</h2><span>谁最需要你今天关注，排在前。</span></div>
             <div className="section-actions">
               {!readOnly ? <button type="button" className="button button-soft" onClick={onOpenQuickAdd}><span aria-hidden="true">＋</span> 更新学生情况</button> : null}
-              <button type="button" className="button button-soft" onClick={onGoStudents}>进入学生看板 →</button>
+              <button type="button" className="button button-soft" onClick={onGoStudents}>查看全部学生 →</button>
             </div>
           </div>
           <div className="student-priority-table">
-            <div className="student-priority-head"><span>学生</span><span>最新成绩</span><span>班级排名</span><span>名次变化</span><span>近期问题</span><span>家校协同</span></div>
+            <div className="student-priority-head"><span>学生</span><span>最新成绩</span><span>班级排名</span><span>名次变化</span><span>近期问题</span><span>家校沟通</span></div>
             {priorityStudents.map(({ student, progress }) => (
               <button type="button" key={student.id} className="student-priority-row" onClick={() => onOpenStudent(student.id)}>
                 <span className="priority-student"><Avatar student={student} size="small" /><span><strong>{student.name}</strong><small>{student.className.replace("年级", "")}</small></span></span>
@@ -1325,11 +1361,9 @@ function TodayView({
   );
 }
 
-function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCalendar, onAddTemplate, onDeleteTemplate, onRestoreException, readOnly }: { data: WorkbenchData; summary: ReturnType<typeof summarizeWorkbench>; onOpenLesson: (id: string) => void; onImportLessons: () => void; onExportCalendar: () => void; onAddTemplate: () => void; onDeleteTemplate: (id: string) => boolean; onRestoreException: (id: string) => boolean; readOnly: boolean }) {
-  const now = new Date().toISOString();
-  const today = getDeviceLocalDate(now, data.user.timeZone);
-  const anchor = data.meta.containsDemoData ? "2026-09-16" : today;
-  const weekDates = getWeekDates(anchor);
+function TeachingView({ data, now, displayDate, summary, onOpenLesson, onImportLessons, onExportCalendar, onAddTemplate, onDeleteTemplate, onRestoreException, readOnly }: { data: WorkbenchData; now: string; displayDate: string; summary: ReturnType<typeof summarizeWorkbench>; onOpenLesson: (lesson: LessonSession) => void; onImportLessons: () => void; onExportCalendar: () => void; onAddTemplate: () => void; onDeleteTemplate: (id: string) => boolean; onRestoreException: (id: string) => boolean; readOnly: boolean }) {
+  const [weekOffset, setWeekOffset] = useState(0);
+  const weekDates = getWeekDates(addDays(displayDate, weekOffset * 7));
   const weekLessons = expandLessonsForRange(data, weekDates[0], weekDates[6], now);
   const timeRows = Array.from(new Set(weekLessons.map((lesson) => lesson.startsAt.slice(11, 16)))).sort();
   const classCount = new Set(weekLessons.map((lesson) => lesson.className)).size;
@@ -1343,38 +1377,38 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
       <SectionHeader
         eyebrow="本周安排"
         title="教学课表"
-        description="点击任一课次查看备课清单与提醒。"
+        description="点击任一课程查看备课清单与提醒。"
         actions={!readOnly ? (
           <div className="section-actions">
-            <button type="button" className="button button-ghost" onClick={onExportCalendar}>导出日历 (.ics)</button>
+            <button type="button" className="button button-ghost" onClick={onExportCalendar}>下载日历文件</button>
             <button type="button" className="button button-soft" onClick={onImportLessons}>＋ 导入课表</button>
-            <button type="button" className="button button-primary" onClick={onAddTemplate}>＋ 重复课次</button>
+            <button type="button" className="button button-primary" onClick={onAddTemplate}>＋ 每周固定课程</button>
           </div>
         ) : undefined}
       />
       <div className="metric-row">
-        <div className="metric-card"><span className="metric-icon sage">课</span><p>本周课次<strong>{weekLessons.length}</strong><small>已完成 {completedLessons} 节</small></p></div>
+        <div className="metric-card"><span className="metric-icon sage">课</span><p>所选周课程<strong>{weekLessons.length}</strong><small>已完成 {completedLessons} 节</small></p></div>
         <div className="metric-card"><span className="metric-icon apricot">班</span><p>任教班级<strong>{classCount}</strong><small>当前档案 {summary.totalStudents} 人</small></p></div>
-        <div className="metric-card"><span className="metric-icon blue">今</span><p>当日课次<strong>{summary.lessonsOnDate}</strong><small>以课表记录为准</small></p></div>
-        <div className="metric-card"><span className="metric-icon violet">醒</span><p>已设课前提醒<strong>{weekLessons.filter((lesson) => lesson.reminderMinutesBefore !== null).length}</strong><small>打开课次查看详情</small></p></div>
+        <div className="metric-card"><span className="metric-icon blue">今</span><p>今天的课<strong>{summary.lessonsOnDate}</strong><small>以课表记录为准</small></p></div>
+        <div className="metric-card"><span className="metric-icon violet">醒</span><p>已设课前提醒<strong>{weekLessons.filter((lesson) => lesson.reminderMinutesBefore !== null).length}</strong><small>打开课程查看详情</small></p></div>
       </div>
 
       <section className="card schedule-card">
-        <div className="schedule-toolbar"><div><span className="date-button static-control">{weekLabel}</span></div><Pill tone="sage">周课表</Pill></div>
+        <div className="schedule-toolbar"><div className="week-navigation"><button type="button" className="button button-ghost" onClick={() => setWeekOffset((value) => value - 1)}>上一周</button><strong aria-live="polite">{weekLabel}</strong><button type="button" className="button button-ghost" onClick={() => setWeekOffset((value) => value + 1)}>下一周</button><button type="button" className="text-button" disabled={weekOffset === 0} onClick={() => setWeekOffset(0)}>回到本周</button></div><Pill tone="sage">{weekOffset === 0 ? "本周课表" : "周课表"}</Pill></div>
         {weekLessons.length === 0 ? (
           <div className="upload-zone schedule-empty-state">
             <NavIcon name="teaching" className="upload-mark" style={{width:38,height:38}} />
-            <h3>本周还没有课次</h3>
-            <p>导入课表或新增重复课次后，这里会按周自动排好。</p>
+            <h3>这一周还没有课程</h3>
+            <p>导入课表或新增每周固定课程后，这里会按周自动排好。</p>
             {!readOnly ? (
               <div className="data-actions-row">
                 <button type="button" className="button button-soft" onClick={onImportLessons}>导入课表</button>
-                <button type="button" className="button button-primary" onClick={onAddTemplate}>＋ 重复课次</button>
+                <button type="button" className="button button-primary" onClick={onAddTemplate}>＋ 每周固定课程</button>
               </div>
             ) : null}
           </div>
         ) : (
-        <div className="schedule-table" role="table" aria-label="本周课表">
+        <div className="schedule-table" role="table" aria-label="所选周课表">
           <div className="schedule-row schedule-head" role="row"><span role="columnheader">时间</span>{weekDates.map((date) => { const day = new Date(`${date}T12:00:00+08:00`).getUTCDay(); return <span key={date} role="columnheader">{weekdayLabels[day]} {Number(date.slice(8, 10))}</span>; })}</div>
           {timeRows.map((time) => (
             <div className="schedule-row" role="row" key={time}>
@@ -1383,7 +1417,7 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
                 const lessons = weekLessons.filter((item) => item.startsAt.slice(0, 10) === date && item.startsAt.slice(11, 16) === time);
                 return lessons.length ? (
                   <div className="schedule-cell" role="cell" key={`${date}-${time}`}>
-                    {lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => onOpenLesson(lesson.id)}><strong>{lesson.className}</strong><small>{lesson.subject} · {lesson.room}</small></button>)}
+                    {lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => onOpenLesson(lesson)} title={`${lesson.title} · ${formatTime(lesson.startsAt)}—${formatTime(lesson.endsAt)}`}><strong>{lesson.className}</strong><small>{lesson.subject} · {lesson.room}</small><small>{lesson.status}</small></button>)}
                   </div>
                 ) : <span className="schedule-empty" role="cell" key={`${date}-${time}`}>—</span>;
               })}
@@ -1393,19 +1427,19 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
         )}
         {!readOnly && (lessonTemplates.length > 0 || lessonExceptions.length > 0) ? (
           <details className="schedule-management">
-            <summary>管理重复课次与临时调整</summary>
+            <summary>管理每周固定课程与临时调整</summary>
             <div className="schedule-management-list">
               {lessonTemplates.map((template) => (
                 <div className="schedule-management-row" key={template.id}>
                   <span><strong>{template.title}</strong><small>{template.className} · {weekdayLabels[template.weekday % 7]} {template.startTime}—{template.endTime}</small></span>
-                  <button type="button" className="text-button danger-text" onClick={() => onDeleteTemplate(template.id)}>删除重复课次</button>
+                  <button type="button" className="text-button danger-text" onClick={() => onDeleteTemplate(template.id)}>删除整学期这门固定课</button>
                 </div>
               ))}
               {lessonExceptions.map((exception) => {
                 const template = lessonTemplates.find((candidate) => candidate.id === exception.templateId);
                 return (
                   <div className="schedule-management-row" key={exception.id}>
-                    <span><strong>{template?.title ?? "已调整课次"}</strong><small>{exception.date} · {exception.action === "cancel" ? "已取消" : `已调至 ${exception.newDate ?? exception.date}${exception.newStartTime ? ` ${exception.newStartTime}` : ""}`}</small></span>
+                    <span><strong>{template?.title ?? "已调整课程"}</strong><small>{exception.date} · {exception.action === "cancel" ? "已取消" : `已调至 ${exception.newDate ?? exception.date}${exception.newStartTime ? ` ${exception.newStartTime}` : ""}`}</small></span>
                     <button type="button" className="text-button" onClick={() => onRestoreException(exception.id)}>撤销本次调整</button>
                   </div>
                 );
@@ -1419,6 +1453,7 @@ function TeachingView({ data, summary, onOpenLesson, onImportLessons, onExportCa
 }
 
 function StudentsView({
+  classes,
   filteredStudents,
   selectedStudent,
   summary,
@@ -1437,6 +1472,7 @@ function StudentsView({
   onDeleteAssessment,
   readOnly,
 }: {
+  classes: string[];
   filteredStudents: StudentRecord[];
   selectedStudent: StudentRecord | null;
   summary: ReturnType<typeof summarizeWorkbench>;
@@ -1467,14 +1503,13 @@ function StudentsView({
     ? selectedStudent.assessments.filter((assessment) => assessment.status === "待核对").slice().sort((a, b) => b.occurredOn.localeCompare(a.occurredOn))
     : [];
   const latest = progress.latest;
-  const classes = Array.from(new Set(filteredStudents.map((student) => student.className)));
 
   return (
     <>
       <SectionHeader
-        eyebrow="成绩、变化与家校协同"
+        eyebrow="成绩变化与家校沟通"
         title="学生档案"
-        description="只看核对过的成绩，变化自动算好。"
+        description="只看老师确认过的成绩，进步退步一眼看清。"
         actions={!readOnly ? (
           <div className="section-actions">
             <button type="button" className="button button-ghost" onClick={onImportAssessments}>导入名单与测评</button>
@@ -1486,8 +1521,8 @@ function StudentsView({
       <div className="student-summary-row">
         <div className="summary-chip active"><span>{summary.totalStudents}</span><small>全部学生</small></div>
         <div className="summary-chip"><span>{summary.rankImproved}</span><small>本次排名上升</small></div>
-        <div className="summary-chip"><span>{summary.issuesPending}</span><small>近期问题待处理</small></div>
-        <div className="summary-chip"><span>{summary.homeSchoolFollowUps}</span><small>家校沟通待推进</small></div>
+        <div className="summary-chip"><span>{summary.issuesPending}</span><small>近期问题待跟进</small></div>
+        <div className="summary-chip"><span>{summary.homeSchoolFollowUps}</span><small>家长沟通待继续</small></div>
       </div>
 
       <div className="students-layout">
@@ -1519,7 +1554,7 @@ function StudentsView({
             <div className="upload-zone">
               <NavIcon name="students" className="upload-mark" />
               <h3>{filteredStudents.length === 0 && studentQuery ? "没有符合条件的学生" : "还没有学生档案"}</h3>
-              <p>{filteredStudents.length === 0 && studentQuery ? "换个关键词或班级再试。" : "从表格中粘贴名单与测评记录，核对无误后开始建立真实学生档案。"}</p>
+              <p>{filteredStudents.length === 0 && studentQuery ? "换个关键词或班级再试。" : "从表格中粘贴学生名单和成绩，确认无误后就能开始使用。"}</p>
               {!readOnly && !(filteredStudents.length === 0 && studentQuery) ? <button type="button" className="button button-primary" onClick={onImportAssessments}>导入名单与测评</button> : null}
             </div>
           </section>
@@ -1542,13 +1577,13 @@ function StudentsView({
           </div>
 
           {pendingAssessments.length ? (
-            <section className="pending-assessment-panel" aria-label="待核对成绩">
-              <div className="subheading"><div><h3>待核对成绩</h3><p>核对后才会进入成绩趋势、排名变化和手机摘要。</p></div><Pill tone="apricot">{pendingAssessments.length} 条</Pill></div>
+            <section className="pending-assessment-panel" aria-label="待确认成绩">
+              <div className="subheading"><div><h3>待确认成绩</h3><p>确认无误后，这条成绩才会用于计算进退步，并显示在手机查看页。</p></div><Pill tone="apricot">{pendingAssessments.length} 条</Pill></div>
               <div className="pending-assessment-list">
                 {pendingAssessments.map((assessment) => (
                   <article key={assessment.id}>
                     <span><strong>{assessment.subject} · {assessment.title}</strong><small>{assessment.occurredOn} · {assessment.score}/{assessment.maxScore} · 第 {assessment.rank}/{assessment.cohortSize}</small></span>
-                    {!readOnly ? <span className="assessment-row-actions"><button type="button" className="button button-soft" onClick={() => onConfirmAssessment(selectedStudent.id, assessment.id)}>核对并计入</button><button type="button" className="text-button" onClick={() => onEditAssessment(selectedStudent.id, assessment.id)}>编辑</button><button type="button" className="text-button danger-text" onClick={() => onDeleteAssessment(selectedStudent.id, assessment.id)}>删除</button></span> : null}
+                    {!readOnly ? <span className="assessment-row-actions"><button type="button" className="button button-soft" onClick={() => onConfirmAssessment(selectedStudent.id, assessment.id)}>确认无误</button><button type="button" className="text-button" onClick={() => onEditAssessment(selectedStudent.id, assessment.id)}>编辑</button><button type="button" className="text-button danger-text" onClick={() => onDeleteAssessment(selectedStudent.id, assessment.id)}>删除</button></span> : null}
                   </article>
                 ))}
               </div>
@@ -1557,23 +1592,25 @@ function StudentsView({
 
           <div className="student-dashboard-body">
             <section className="performance-panel">
-              <div className="subheading"><div><h3>{progress.subject ?? "当前学科"}成绩与排名动态</h3><p>只比较同一学科、已核对的测评记录</p></div><div className="segmented-control compact two-options"><button type="button" className={chartMode === "score" ? "active" : ""} onClick={() => setChartMode("score")}>成绩</button><button type="button" className={chartMode === "rank" ? "active" : ""} onClick={() => setChartMode("rank")}>排名</button></div></div>
-              <div className="score-chart" aria-label={`最近${assessments.length}次${chartMode === "score" ? "成绩" : "排名"}变化`}>
-                {chartMode === "score" && latest ? <div className="average-line" style={{ bottom: `${Math.max(12, Math.min(92, latest.classAverage))}%` }}><span>班均 {latest.classAverage}</span></div> : null}
-                {assessments.map((assessment) => {
+              <div className="subheading"><div><h3>{progress.subject ?? "当前学科"}成绩与排名变化</h3><p>这里只比较同一学科、老师确认过的成绩</p></div><div className="segmented-control compact two-options"><button type="button" aria-pressed={chartMode === "score"} className={chartMode === "score" ? "active" : ""} onClick={() => setChartMode("score")}>成绩</button><button type="button" aria-pressed={chartMode === "rank"} className={chartMode === "rank" ? "active" : ""} onClick={() => setChartMode("rank")}>排名</button></div></div>
+              <p className="chart-explanation">{chartMode === "score" ? "柱高按得分率显示，虚线是该次班级均分。" : "柱高按班级内位置显示，越高越靠前；参考人数不同时不比较名次变化。"} {assessments.length > 8 ? "图中显示最近 8 次，完整记录见下表。" : ""}</p>
+              <div className="score-chart" aria-label={`最近${Math.min(8, assessments.length)}次${chartMode === "score" ? "成绩" : "排名"}变化`}>
+                {!assessments.length ? <p className="chart-empty">确认成绩后，这里会显示变化趋势。</p> : null}
+                {assessments.slice(-8).map((assessment) => {
                   const value = chartMode === "score" ? assessment.score : assessment.rank;
                   const height = chartMode === "score" ? (assessment.score / assessment.maxScore) * 100 : ((assessment.cohortSize - assessment.rank + 1) / assessment.cohortSize) * 100;
-                  return <div className="score-column" key={assessment.id}><span className="score-value">{chartMode === "score" ? value : `第${value}`}</span><i style={{ height: `${Math.max(18, height)}%` }} /><small>{assessment.title}</small></div>;
+                  return <div className="score-column" key={assessment.id}><div className="score-plot"><span className="score-bar" style={{ height: `${height}%` }}><span className="score-value">{chartMode === "score" ? `${value}/${assessment.maxScore}` : `第${value}/${assessment.cohortSize}`}</span></span>{chartMode === "score" ? <span className="average-marker" style={{ bottom: `${assessment.classAverage / assessment.maxScore * 100}%` }} title={`班均 ${assessment.classAverage}/${assessment.maxScore}`} /> : null}</div><small title={`${assessment.title} · ${assessment.occurredOn}`}>{assessment.title}</small></div>;
                 })}
               </div>
               <div className="exam-table">
                 <div><span>测评</span><span>成绩</span><span>班级排名</span><span>变化</span></div>
                 {assessments.map((assessment, index) => {
                   const previous = index > 0 ? assessments[index - 1] : null;
-                  const scoreChange = previous && previous.maxScore === assessment.maxScore ? assessment.score - previous.score : null;
+                  const scoreChange = previous && previous.maxScore === assessment.maxScore ? Math.round((assessment.score - previous.score) * 100) / 100 : null;
                   const rateChange = previous ? Math.round((((assessment.score / assessment.maxScore) - (previous.score / previous.maxScore)) * 100) * 10) / 10 : null;
-                  const rankChange = previous ? previous.rank - assessment.rank : null;
-                  const changeLabel = !previous ? "首次记录" : scoreChange === null ? `${(rateChange ?? 0) >= 0 ? "+" : ""}${rateChange} 个百分点 · ${formatChange(rankChange, "名")}` : `${scoreChange >= 0 ? "+" : ""}${scoreChange}分 · ${formatChange(rankChange, "名")}`;
+                  const rankChange = previous && previous.cohortSize === assessment.cohortSize ? previous.rank - assessment.rank : null;
+                  const rankLabel = rankChange === null ? "参考人数不同，不比较排名" : formatChange(rankChange, "名");
+                  const changeLabel = !previous ? "首次记录" : scoreChange === null ? `${(rateChange ?? 0) >= 0 ? "+" : ""}${rateChange} 个百分点 · ${rankLabel}` : `${scoreChange >= 0 ? "+" : ""}${scoreChange}分 · ${rankLabel}`;
                   return <div key={assessment.id}><strong>{assessment.title}<small>{assessment.occurredOn} · {assessment.source}</small></strong><span>{assessment.score}/{assessment.maxScore}</span><span>第 {assessment.rank} / {assessment.cohortSize}</span><span className={(rankChange ?? 0) >= 0 ? "trend-up" : "trend-down"}>{changeLabel}{!readOnly ? <span className="assessment-inline-actions"><button type="button" onClick={() => onEditAssessment(selectedStudent.id, assessment.id)}>编辑</button><button type="button" onClick={() => onDeleteAssessment(selectedStudent.id, assessment.id)}>删除</button></span> : null}</span></div>;
                 })}
               </div>
@@ -1583,26 +1620,26 @@ function StudentsView({
               <section className="recent-issue-card">
                 <div className="subheading"><h3>近期问题</h3><Pill tone={toneForIssue(selectedStudent.recentIssue?.status)}>{selectedStudent.recentIssue?.status ?? "暂无"}</Pill></div>
                 <p>{selectedStudent.recentIssue?.detail ?? "当前没有待跟进问题。"}</p>
-                <div className="issue-next"><small>下一步</small><strong>{selectedStudent.recentIssue?.nextAction ?? "暂无安排"}</strong>{selectedStudent.recentIssue?.followUpOn ? <span>复核日期：{selectedStudent.recentIssue.followUpOn}</span> : null}</div>
+                <div className="issue-next"><small>下次怎么跟进</small><strong>{selectedStudent.recentIssue?.nextAction ?? "暂无安排"}</strong>{selectedStudent.recentIssue?.followUpOn ? <span>计划跟进：{selectedStudent.recentIssue.followUpOn}</span> : null}</div>
               </section>
 
               <section className="parent-cooperation-card">
-                <div className="subheading"><div><h3>家校协同</h3><p>由老师手动选择，可随时更新</p></div></div>
+                <div className="subheading"><div><h3>家校沟通</h3><p>按最近一次沟通情况选择，之后可以随时调整</p></div></div>
                 <div className="rating-block">
                   <div className="rating-title"><span>沟通难度</span><strong>{COMMUNICATION_DIFFICULTY_LABELS[selectedStudent.homeSchool.communicationDifficulty]}</strong></div>
                   <div className="rating-options" role="group" aria-label="家长沟通难度">
-                    {COMMUNICATION_DIFFICULTY_LABELS.slice(1).map((label, index) => <button type="button" key={label} disabled={readOnly} className={selectedStudent.homeSchool.communicationDifficulty === index + 1 ? "active" : ""} onClick={() => onParentCommunication((index + 1) as 1 | 2 | 3 | 4 | 5)}><span>{index + 1}</span><small>{label}</small></button>)}
+                    {COMMUNICATION_DIFFICULTY_LABELS.slice(1).map((label, index) => <button type="button" key={label} disabled={readOnly} aria-pressed={selectedStudent.homeSchool.communicationDifficulty === index + 1} className={selectedStudent.homeSchool.communicationDifficulty === index + 1 ? "active" : ""} onClick={() => onParentCommunication((index + 1) as 1 | 2 | 3 | 4 | 5)}><span>{index + 1}</span><small>{label}</small></button>)}
                   </div>
                   <p>{selectedStudent.homeSchool.communicationNote}</p>
                 </div>
                 <div className="rating-block">
-                  <div className="rating-title"><span>家长辅助意愿</span><strong>{SUPPORT_WILLINGNESS_LABELS[selectedStudent.homeSchool.supportWillingness]}</strong></div>
-                  <div className="rating-options support" role="group" aria-label="家长辅助意愿">
-                    {SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <button type="button" key={label} disabled={readOnly} className={selectedStudent.homeSchool.supportWillingness === index + 1 ? "active" : ""} onClick={() => onParentSupport((index + 1) as 1 | 2 | 3 | 4 | 5)}><span>{index + 1}</span><small>{label}</small></button>)}
+                  <div className="rating-title"><span>家长配合意愿</span><strong>{SUPPORT_WILLINGNESS_LABELS[selectedStudent.homeSchool.supportWillingness]}</strong></div>
+                  <div className="rating-options support" role="group" aria-label="家长配合意愿">
+                    {SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <button type="button" key={label} disabled={readOnly} aria-pressed={selectedStudent.homeSchool.supportWillingness === index + 1} className={selectedStudent.homeSchool.supportWillingness === index + 1 ? "active" : ""} onClick={() => onParentSupport((index + 1) as 1 | 2 | 3 | 4 | 5)}><span>{index + 1}</span><small>{label}</small></button>)}
                   </div>
                   <p>{selectedStudent.homeSchool.supportNote}</p>
                 </div>
-                <div className="rating-note"><span aria-hidden="true">i</span> 评价本次协同过程，不作为家庭的固定标签。</div>
+                <div className="rating-note"><span aria-hidden="true">i</span> 只记录最近一次沟通感受，不给家庭贴标签。</div>
               </section>
             </aside>
           </div>
@@ -1645,7 +1682,7 @@ function TasksView({
       <div className="tasks-layout">
         <section className="card tasks-main-card">
           <div className="tasks-toolbar">
-            <div className="filter-chips">{filters.map((filter) => <button key={filter} type="button" className={taskFilter === filter ? "active" : ""} onClick={() => onFilter(filter)}>{filter}{filter === "全部" ? <span>{allTasks.length}</span> : null}</button>)}</div>
+            <div className="filter-chips">{filters.map((filter) => <button key={filter} type="button" aria-pressed={taskFilter === filter} className={taskFilter === filter ? "active" : ""} onClick={() => onFilter(filter)}>{filter}{filter === "全部" ? <span>{allTasks.length}</span> : null}</button>)}</div>
             <span className="sort-label">已按截止时间排列</span>
           </div>
           <div className="task-list-full">
@@ -1657,7 +1694,7 @@ function TasksView({
                   <div className="task-body">
                     <div className="task-title-line"><Pill tone={toneForTask(task.category)}>{task.category}</Pill><Pill tone={done ? "sage" : task.status === "进行中" ? "blue" : "neutral"}>{task.status}</Pill></div>
                     <h3>{task.title}</h3>
-                    <p><span>截止 {formatDateTime(task.dueAt)}</span><span>预计 {formatMinutes(task.estimatedMinutes)}</span><span>{task.relatedLabel ?? "未关联"}</span>{task.reminderAt ? <span>提醒 {formatDateTime(task.reminderAt)}</span> : null}</p>
+                    <p><span>截止 {formatDateTime(task.dueAt)}</span><span>预计 {formatMinutes(task.estimatedMinutes)}</span><span>{task.relatedLabel ?? "未填写学生或班级"}</span>{task.reminderAt ? <span>提醒 {formatDateTime(task.reminderAt)}</span> : null}</p>
                   </div>
                 </article>
               );
@@ -1672,8 +1709,8 @@ function TasksView({
           </div>
         </section>
         <aside className="tasks-aside">
-          <section className="card workload-card"><p className="eyebrow">当前待办</p><h2>{taskSummary.openTaskCount} 件 · {formatMinutes(taskSummary.openMinutes)}</h2><p>所有时长都由未完成事项的预计用时相加得出。</p><div className="load-bar"><i style={{ width: `${completionRate}%` }} /></div><div className="load-legend"><span><i className="filled" />已完成 {formatMinutes(taskSummary.completedMinutes)}</span><span><i />待完成 {formatMinutes(taskSummary.openMinutes)}</span></div></section>
-          <section className="card workload-card"><p className="eyebrow">按类别预计</p>{(["教学", "学生", "行政", "论文"] as TaskCategory[]).map((category) => <div className="category-duration" key={category}><span>{category}</span><strong>{formatMinutes(taskSummary.byCategory[category])}</strong></div>)}</section>
+          <section className="card workload-card"><p className="eyebrow">当前待办</p><h2>{taskSummary.openTaskCount} 件 · {formatMinutes(taskSummary.openMinutes)}</h2><p>按未完成事项的预计用时合计。</p><div className="load-bar"><i style={{ width: `${completionRate}%` }} /></div><div className="load-legend"><span><i className="filled" />已完成 {formatMinutes(taskSummary.completedMinutes)}</span><span><i />待完成 {formatMinutes(taskSummary.openMinutes)}</span></div></section>
+          <section className="card workload-card"><p className="eyebrow">各类待办用时</p>{(["教学", "学生", "行政", "论文"] as TaskCategory[]).map((category) => <div className="category-duration" key={category}><span>{category}</span><strong>{formatMinutes(taskSummary.byCategory[category])}</strong></div>)}</section>
         </aside>
       </div>
     </>
@@ -1691,7 +1728,7 @@ function ResourcesView({ resources }: { resources: WorkbenchData["resources"] })
   });
   return (
     <>
-      <SectionHeader eyebrow="查找与复用" title="教学资料" description="搜名称、学科或班级，找到要用的那一份。" />
+      <SectionHeader eyebrow="常用资料" title="教学资料" description="搜名称、学科或班级，找到要用的那一份。" />
       <div className="resource-toolbar card"><label className="inline-search"><NavIcon name="search" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资料名称、学科或班级" /></label><div className="filter-chips">{filters.map((filter) => <button type="button" key={filter} className={kind === filter ? "active" : ""} onClick={() => setKind(filter)}>{filter}</button>)}</div></div>
       <div className="resource-grid">
         {visible.map((resource, index) => <article className="resource-card card" key={resource.id}><span className={`file-mark ${["sage", "apricot", "blue", "violet", "rose"][index % 5]}`}>{resource.kind.slice(0, 1)}</span><span><Pill tone="sage">{resource.kind}</Pill><strong>{resource.title}</strong><small>{resource.gradeOrClass} · {resource.subject}</small><small>{resource.location}</small></span></article>)}
@@ -1701,7 +1738,7 @@ function ResourcesView({ resources }: { resources: WorkbenchData["resources"] })
   );
 }
 
-function Modal({ title, subtitle, onClose, children, wide = false }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+function useDialogFocus(onClose: () => void, enabled = true) {
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
 
@@ -1710,11 +1747,15 @@ function Modal({ title, subtitle, onClose, children, wide = false }: { title: st
   }, [onClose]);
 
   useEffect(() => {
+    if (!enabled) return;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
-    const focusableSelector = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-    const firstInput = dialog?.querySelector<HTMLElement>("input:not([disabled]), select:not([disabled]), textarea:not([disabled])");
-    const firstFocusable = dialog?.querySelector<HTMLElement>(focusableSelector);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusableSelector = 'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const visible = Array.from(dialog?.querySelectorAll<HTMLElement>(focusableSelector) ?? []).filter((element) => element.getClientRects().length > 0);
+    const firstInput = visible.find((element) => element.matches("input, select, textarea"));
+    const firstFocusable = visible[0];
     (firstInput ?? firstFocusable ?? dialog)?.focus();
 
     function handleKey(event: KeyboardEvent) {
@@ -1733,7 +1774,10 @@ function Modal({ title, subtitle, onClose, children, wide = false }: { title: st
       }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
+      if (!dialogRef.current.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -1744,9 +1788,15 @@ function Modal({ title, subtitle, onClose, children, wide = false }: { title: st
     document.addEventListener("keydown", handleKey);
     return () => {
       document.removeEventListener("keydown", handleKey);
+      document.body.style.overflow = previousOverflow;
       if (previousFocus?.isConnected) previousFocus.focus();
     };
-  }, []);
+  }, [enabled]);
+  return dialogRef;
+}
+
+function Modal({ title, subtitle, onClose, children, wide = false }: { title: string; subtitle?: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  const dialogRef = useDialogFocus(onClose);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section ref={dialogRef} className={`modal-card ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
@@ -1812,8 +1862,8 @@ function StudentUpdateModal({ student, defaultDate, onClose, onSave }: { student
       const supportNote = String(form.get("supportNote") ?? "").trim();
       const communicationDifficulty = Number(form.get("communicationDifficulty"));
       const supportWillingness = Number(form.get("supportWillingness"));
-      if (communicationDifficulty < 1 || communicationDifficulty > 5 || supportWillingness < 1 || supportWillingness > 5) return setError("请由老师选择沟通难度和家长辅助意愿。 ");
-      if (!communicationNote || !supportNote) return setError("请分别补充沟通情况和家庭辅助情况。");
+      if (communicationDifficulty < 1 || communicationDifficulty > 5 || supportWillingness < 1 || supportWillingness > 5) return setError("请选择沟通难度和家长配合意愿。 ");
+      if (!communicationNote || !supportNote) return setError("请分别补充沟通情况和家长配合情况。");
       onSave({
         kind,
         studentId: student.id,
@@ -1826,51 +1876,51 @@ function StudentUpdateModal({ student, defaultDate, onClose, onSave }: { student
   }
 
   return (
-    <Modal title={`更新 ${student.name} 的情况`} subtitle="保存后，首页、学生看板和汇总数字会同步变化。" onClose={onClose} wide>
+    <Modal title={`更新 ${student.name} 的情况`} subtitle="保存后，首页和学生档案里的相关内容会一起更新。" onClose={onClose} wide>
       <form className="quick-form" onSubmit={submit}>
-        <div className="record-type-tabs" role="tablist" aria-label="更新类型">
-          <button type="button" className={kind === "assessment" ? "active" : ""} onClick={() => setKind("assessment")}>成绩与排名</button>
-          <button type="button" className={kind === "issue" ? "active" : ""} onClick={() => setKind("issue")}>近期问题</button>
-          <button type="button" className={kind === "homeSchool" ? "active" : ""} onClick={() => setKind("homeSchool")}>家校协同</button>
+        <div className="record-type-tabs" role="group" aria-label="更新类型">
+          <button type="button" aria-pressed={kind === "assessment"} className={kind === "assessment" ? "active" : ""} onClick={() => setKind("assessment")}>成绩与排名</button>
+          <button type="button" aria-pressed={kind === "issue"} className={kind === "issue" ? "active" : ""} onClick={() => setKind("issue")}>近期问题</button>
+          <button type="button" aria-pressed={kind === "homeSchool"} className={kind === "homeSchool" ? "active" : ""} onClick={() => setKind("homeSchool")}>家校沟通</button>
         </div>
 
         {kind === "assessment" ? (
-          <div className="form-grid">
+          <div className="form-grid" key="assessment">
             <label>测评名称<input name="title" required defaultValue="随堂测" /></label>
             <label>测评日期<input name="occurredOn" type="date" required defaultValue={defaultDate} /></label>
             <label>学科<input name="subject" required defaultValue={latest?.subject ?? "语文"} /></label>
             <label>满分<input name="maxScore" type="number" min="1" required defaultValue={latest?.maxScore ?? 100} /></label>
-            <label>成绩<input name="score" type="number" min="0" step="0.5" required defaultValue={latest?.score ?? 0} /></label>
-            <label>班级排名<input name="rank" type="number" min="1" required defaultValue={latest?.rank ?? 1} /></label>
+            <label>成绩<input name="score" type="number" min="0" step="any" required placeholder="填写本次成绩" /></label>
+            <label>班级排名<input name="rank" type="number" min="1" required placeholder="填写本次排名" /></label>
             <label>参考人数<input name="cohortSize" type="number" min="1" required defaultValue={latest?.cohortSize ?? 1} /></label>
-            <label>班级均分<input name="classAverage" type="number" min="0" step="0.1" required defaultValue={latest?.classAverage ?? 0} /></label>
-            <label>记录来源<select name="source" defaultValue="手工录入"><option>手工录入</option><option>表格导入</option><option>图片识别</option></select></label>
-            <label>核对状态<select name="status" defaultValue="已核对"><option>已核对</option><option>待核对</option></select></label>
+            <label>班级均分<input name="classAverage" type="number" min="0" step="any" required placeholder="填写本次均分" /></label>
+            <input type="hidden" name="source" value="手工录入" />
+            <label>是否确认<select name="status" defaultValue="已核对"><option value="已核对">确认无误</option><option value="待核对">稍后确认</option></select></label>
           </div>
         ) : null}
 
         {kind === "issue" ? (
-          <div className="form-grid">
-            <label className="full-field">问题标题<input name="issueTitle" required defaultValue={student.recentIssue?.title ?? ""} /></label>
+          <div className="form-grid" key="issue">
+            <label className="full-field">一句话概括<input name="issueTitle" required defaultValue={student.recentIssue?.title ?? ""} /></label>
             <label>发现日期<input name="observedOn" type="date" required defaultValue={student.recentIssue?.observedOn ?? defaultDate} /></label>
             <label>处理状态<select name="issueStatus" defaultValue={student.recentIssue?.status ?? "待处理"}><option>待处理</option><option>观察中</option><option>已缓解</option></select></label>
-            <label className="full-field">具体情况<textarea name="detail" required defaultValue={student.recentIssue?.detail ?? ""} /></label>
-            <label className="full-field">下一步<textarea name="nextAction" required defaultValue={student.recentIssue?.nextAction ?? ""} /></label>
-            <label>复核日期<input name="followUpOn" type="date" defaultValue={student.recentIssue?.followUpOn ?? ""} /></label>
+            <label className="full-field">具体表现<textarea name="detail" required defaultValue={student.recentIssue?.detail ?? ""} /></label>
+            <label className="full-field">准备怎么跟进<textarea name="nextAction" required defaultValue={student.recentIssue?.nextAction ?? ""} /></label>
+            <label>计划跟进日期<input name="followUpOn" type="date" defaultValue={student.recentIssue?.followUpOn ?? ""} /></label>
           </div>
         ) : null}
 
         {kind === "homeSchool" ? (
-          <div className="form-grid">
+          <div className="form-grid" key="homeSchool">
             <label>沟通难度<select name="communicationDifficulty" defaultValue={student.homeSchool.communicationDifficulty}><option value="0">请选择</option>{COMMUNICATION_DIFFICULTY_LABELS.slice(1).map((label, index) => <option value={index + 1} key={label}>{index + 1} · {label}</option>)}</select></label>
-            <label>家长辅助意愿<select name="supportWillingness" defaultValue={student.homeSchool.supportWillingness}><option value="0">请选择</option>{SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <option value={index + 1} key={label}>{index + 1} · {label}</option>)}</select></label>
+            <label>家长配合意愿<select name="supportWillingness" defaultValue={student.homeSchool.supportWillingness}><option value="0">请选择</option>{SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <option value={index + 1} key={label}>{index + 1} · {label}</option>)}</select></label>
             <label className="full-field">沟通情况<textarea name="communicationNote" required defaultValue={student.homeSchool.communicationNote} /></label>
-            <label className="full-field">家庭辅助情况<textarea name="supportNote" required defaultValue={student.homeSchool.supportNote} /></label>
+            <label className="full-field">家长配合情况<textarea name="supportNote" required defaultValue={student.homeSchool.supportNote} /></label>
           </div>
         ) : null}
 
         {error ? <p className="form-error" role="alert">{error}</p> : null}
-        <p className="form-note"><span aria-hidden="true">i</span> 家校等级由老师手动选择，只描述当前协同情况。</p>
+        {kind === "homeSchool" ? <p className="form-note"><span aria-hidden="true">i</span> 请按最近一次沟通情况选择，之后可以随时调整。</p> : null}
         <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存更新</button></div>
       </form>
     </Modal>
@@ -1914,7 +1964,7 @@ function AssessmentReviewModal({
   }
 
   return (
-    <Modal title={`核对成绩 · ${student.name}`} subtitle={`来源：${assessment.source} · 当前${assessment.status}`} onClose={onClose} wide>
+    <Modal title={`确认成绩 · ${student.name}`} subtitle={`${assessment.source === "手工录入" ? "手动填写" : assessment.source === "表格导入" ? "从表格导入" : "从图片录入"} · ${assessment.status === "待核对" ? "还未确认" : "已经确认"}`} onClose={onClose} wide>
       <form className="quick-form" onSubmit={submit}>
         <div className="form-grid">
           <label>测评名称<input name="title" required defaultValue={assessment.title} /></label>
@@ -1926,11 +1976,11 @@ function AssessmentReviewModal({
           <label>参考人数<input name="cohortSize" type="number" min="1" step="1" required defaultValue={assessment.cohortSize} /></label>
           <label>班级均分<input name="classAverage" type="number" min="0" step="0.1" required defaultValue={assessment.classAverage} /></label>
         </div>
-        <p className="form-note"><span aria-hidden="true">i</span> “核对并计入”后才会进入趋势、进退步和手机摘要；继续待核对不会影响正式判断。</p>
+        <p className="form-note"><span aria-hidden="true">i</span> 确认无误后，这条成绩才会用于比较进退步；暂不确认时不会影响现有结果。</p>
         {error ? <p className="form-error" role="alert">{error}</p> : null}
         <div className="modal-actions split-actions">
           <button type="button" className="text-button danger-text" onClick={() => { if (onDelete()) onClose(); }}>删除记录</button>
-          <span className="modal-action-group"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" name="decision" value="keep-pending" className="button button-soft">保存为待核对</button><button type="submit" name="decision" value="confirm" className="button button-primary">核对并计入</button></span>
+          <span className="modal-action-group"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" name="decision" value="keep-pending" className="button button-soft">暂不确认</button><button type="submit" name="decision" value="confirm" className="button button-primary">确认无误</button></span>
         </div>
       </form>
     </Modal>
@@ -1962,15 +2012,15 @@ function NewTaskModal({ demoMode, onClose, onSave }: { demoMode: boolean; onClos
   }
 
   return (
-    <Modal title="新建事项" subtitle="教学、学生、行政和论文事项都使用同一组时间与提醒规则。" onClose={onClose}>
+    <Modal title="新建事项" subtitle="把截止时间和提醒一起记下来，之后不容易漏掉。" onClose={onClose}>
       <form className="quick-form" onSubmit={submit}>
         <label>类别<select name="category" defaultValue="教学"><option>教学</option><option>学生</option><option>行政</option><option>论文</option></select></label>
-        <label>事项标题<input name="title" required placeholder="例如：核对八4阅读问题单" /></label>
+        <label>事项标题<input name="title" required placeholder="例如：查看八年级4班阅读问题单" /></label>
         <div className="form-grid">
           <label>截止时间<input name="dueAt" type="datetime-local" required defaultValue={defaultDue} /></label>
           <label>预计用时（分钟）<input name="estimatedMinutes" type="number" min="1" max="1440" required defaultValue="30" /></label>
           <label>提醒时间<input name="reminderAt" type="datetime-local" /></label>
-          <label>关联学生或班级<input name="relatedLabel" placeholder="可选" /></label>
+          <label>涉及的学生或班级（选填）<input name="relatedLabel" placeholder="例如：李明澈或八年级4班" /></label>
         </div>
         {error ? <p className="form-error" role="alert">{error}</p> : null}
         <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存事项</button></div>
@@ -2013,7 +2063,7 @@ function LessonModal({ lesson, activeException, readOnly, onClose, onException, 
         <div className="lesson-status-line">
           <Pill tone={lesson.status === "已完成" ? "sage" : "blue"}>{lesson.status}</Pill>
           <span>{lesson.reminderMinutesBefore === null ? "未设置课前提醒" : `课前 ${lesson.reminderMinutesBefore} 分钟提醒`}</span>
-          {isTemplateOccurrence ? <Pill tone="violet">重复课次</Pill> : null}
+          {isTemplateOccurrence ? <Pill tone="violet">每周固定课程</Pill> : null}
         </div>
         <section className="modal-section"><p className="eyebrow">本次内容</p><h3>{lesson.title}</h3></section>
         <section className="modal-section"><p className="eyebrow">备课清单</p><p>{lesson.preparation}</p></section>
@@ -2049,7 +2099,7 @@ function LessonModal({ lesson, activeException, readOnly, onClose, onException, 
         {!readOnly ? (
           <span className="modal-action-group">
             {!isTemplateOccurrence && onDeleteConcrete ? <button type="button" className="text-button danger-text" onClick={() => onDeleteConcrete(lesson.id)}>删除这节课</button> : null}
-            {isTemplateOccurrence && onDeleteTemplate ? <button type="button" className="text-button danger-text" onClick={() => onDeleteTemplate(templateId)}>删除整个重复课次</button> : null}
+            {isTemplateOccurrence && onDeleteTemplate ? <button type="button" className="text-button danger-text" onClick={() => onDeleteTemplate(templateId)}>删除整学期这门固定课</button> : null}
             {activeException && onRestoreException ? <button type="button" className="text-button" onClick={() => onRestoreException(activeException.id)}>撤销本次调整</button> : null}
           </span>
         ) : <span />}
@@ -2096,10 +2146,10 @@ function LessonTemplateModal({ defaultSemesterStart, onClose, onSave }: { defaul
   }
 
   return (
-    <Modal title="新增重复课次" subtitle="每周固定某天的同一时段，学期内自动进课表；临时调整用单次的调课。" onClose={onClose} wide>
+    <Modal title="新增每周固定课程" subtitle="填写每周上课时间和学期日期，课程会自动显示在课表中。" onClose={onClose} wide>
       <form className="quick-form" onSubmit={submit}>
         <div className="form-grid">
-          <label>课次标题<input name="title" required placeholder="例如:语文正课" /></label>
+          <label>课程名称<input name="title" required placeholder="例如：语文正课" /></label>
           <label>学科<input name="subject" required defaultValue="语文" /></label>
           <label>班级<input name="className" required placeholder="例如:八年级4班" /></label>
           <label>周几<select name="weekday" defaultValue="1"><option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option></select></label>
@@ -2112,21 +2162,21 @@ function LessonTemplateModal({ defaultSemesterStart, onClose, onSave }: { defaul
           <label className="full-field">备课清单<input name="preparation" placeholder="例如:课件、对照片段" /></label>
         </div>
         {error ? <p className="form-error" role="alert">{error}</p> : null}
-        <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存重复课次</button></div>
+        <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存固定课程</button></div>
       </form>
     </Modal>
   );
 }
 
-function MobileUpdateModal({ data, complete, content, localDate, onClose, onUpdate, onPreview }: { data: WorkbenchData; complete: boolean; content: MobileReadOnlySnapshot | null; localDate: string; onClose: () => void; onUpdate: () => void; onPreview: () => void }) {
-  const candidate = createMobileReadOnlySnapshot(data, new Date().toISOString(), { localDate });
+function MobileUpdateModal({ data, complete, content, localDate, referenceNow, onClose, onUpdate, onPreview }: { data: WorkbenchData; complete: boolean; content: MobileReadOnlySnapshot | null; localDate: string; referenceNow: string; onClose: () => void; onUpdate: () => void; onPreview: () => void }) {
+  const candidate = createMobileReadOnlySnapshot(data, new Date().toISOString(), { localDate, referenceNow });
   return (
     <Modal title="生成手机查看文件" subtitle={content ? `上次生成于 ${formatDateTime(content.generatedAt)}` : "还没有生成手机查看内容"} onClose={onClose} wide>
       {!complete ? (
         <div className="publish-preview">
-          <div className="snapshot-summary"><div><p className="eyebrow">固定摘要范围</p><h3>只导出手机查看所需内容</h3><span>正式工作台数据不能在手机修改；手机速记仍单独保存在手机上。</span></div><Pill tone="sage">只读文件</Pill></div>
-          <div className="preview-columns"><div><small>学生</small><strong>{candidate.priorityStudents.length} 名重点学生（最多 5 名）</strong><strong>最新已核对成绩与排名</strong><strong>近期关注状态</strong></div><div><small>课表与事项</small><strong>{candidate.upcomingLessons.length} 节未来课次（最多 5 节）</strong><strong>{candidate.openTasks.length} 件未完成事项（最多 8 件）</strong><strong>不包含附件和全量档案</strong></div></div>
-          <p className="form-note"><span aria-hidden="true">i</span> 文件含学生姓名与摘要，请只传到老师自己的设备，不要公开上传或转发。</p>
+          <div className="snapshot-summary"><div><p className="eyebrow">手机会显示这些内容</p><h3>只带上手机查看需要的内容</h3><span>手机上不能修改学生、成绩、课表和事项；手机速记会单独保存在手机上。</span></div><Pill tone="sage">只能查看</Pill></div>
+          <div className="preview-columns"><div><small>学生</small><strong>{candidate.priorityStudents.length} 名重点学生（最多 5 名）</strong><strong>最新确认过的成绩与排名</strong><strong>近期需要关注的问题</strong></div><div><small>课表与事项</small><strong>{candidate.upcomingLessons.length} 节接下来的课（最多 5 节）</strong><strong>{candidate.openTasks.length} 件未完成事项（最多 8 件）</strong><strong>不包含完整成绩记录、家校沟通备注和教学资料</strong></div></div>
+          <p className="form-note"><span aria-hidden="true">i</span> 文件里有学生姓名、成绩和近期问题，请只传到自己的设备，不要公开上传或转发。</p>
           <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="button" className="button button-primary" onClick={onUpdate}>生成并下载</button></div>
         </div>
       ) : (
@@ -2137,21 +2187,22 @@ function MobileUpdateModal({ data, complete, content, localDate, onClose, onUpda
 }
 
 function MobilePreview({ content, onClose }: { content: MobileReadOnlySnapshot | null; onClose: () => void }) {
+  const dialogRef = useDialogFocus(onClose);
   return (
     <div className="mobile-preview-backdrop" role="presentation" onMouseDown={onClose}>
-      <div className="phone-demo-wrap" role="dialog" aria-modal="true" aria-label="手机内容预览" onMouseDown={(event) => event.stopPropagation()}>
+      <section ref={dialogRef} tabIndex={-1} className="phone-demo-wrap" role="dialog" aria-modal="true" aria-label="手机内容预览" onMouseDown={(event) => event.stopPropagation()}>
         <button type="button" className="phone-close" onClick={onClose}>关闭预览 ×</button>
         <div className="phone-frame">
           <div className="phone-status"><span>16:48</span><span>◒ 5G ▰</span></div>
           <header><span className="brand-mark">{(content?.workbenchName ?? "教师工作台").slice(0, 1)}</span><span><strong>{content?.workbenchName ?? "教师个人工作台"}</strong><small>仅供查看 · {content ? formatDateTime(content.generatedAt) : "尚未更新"}</small></span></header>
           <main>
-            <section className="phone-hero"><Pill tone="dark">手机看板</Pill><h2>{content ? `还有 ${content.summary.openTasks} 件事\n需要关注` : "还没有可查看的内容"}</h2><p>修改请回到电脑工作台。</p></section>
-            {content ? <><section><div className="phone-section-head"><h3>最近事项</h3><span>{content.openTasks.length} 件</span></div>{content.openTasks.slice(0, 3).map((task) => <div className="phone-task" key={task.id}><span className={`phone-task-dot ${task.category}`} /><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · {task.relatedLabel ?? "未关联"}</small></span></div>)}</section><section><div className="phone-section-head"><h3>学生待跟进</h3><span>{content.priorityStudents.length} 人</span></div><div className="phone-students">{content.priorityStudents.slice(0, 4).map((student) => <span key={student.id}><span className="avatar avatar-sage avatar-small">{student.name.slice(-2)}</span><small>{student.name}</small></span>)}</div></section></> : null}
+            <section className="phone-hero"><Pill tone="dark">手机查看</Pill><h2>{content ? `还有 ${content.summary.openTasks} 件事\n需要关注` : "还没有可查看的内容"}</h2><p>需要修改时，请回到电脑工作台。</p></section>
+            {content ? <><section><div className="phone-section-head"><h3>最近事项</h3><span>{content.openTasks.length} 件</span></div>{content.openTasks.slice(0, 3).map((task) => <div className="phone-task" key={task.id}><span className={`phone-task-dot ${task.category}`} /><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · {task.relatedLabel ?? "未填写学生或班级"}</small></span></div>)}</section><section><div className="phone-section-head"><h3>学生待跟进</h3><span>{content.priorityStudents.length} 人</span></div><div className="phone-students">{content.priorityStudents.slice(0, 4).map((student) => <span key={student.id}><span className="avatar avatar-sage avatar-small">{student.name.slice(-2)}</span><small>{student.name}</small></span>)}</div></section></> : null}
           </main>
           <div className="phone-static-nav"><span>今日</span><span>学生</span><span>课表</span><span>事项</span><span>速记</span></div>
         </div>
-        <div className="phone-preview-note"><strong>手机核心数据没有编辑入口</strong><p>这里只预览本次生成的手机内容；速记单独保存在手机上。</p></div>
-      </div>
+        <div className="phone-preview-note"><strong>手机上不能修改学生、成绩、课表和事项</strong><p>这里只预览本次生成的手机内容；速记会单独保存在手机上。</p></div>
+      </section>
     </div>
   );
 }
@@ -2174,21 +2225,20 @@ function MobileSnapshotEmpty({ onImportFile, message }: { onImportFile: (file: F
       <h1>这台手机还没有查看内容</h1>
       <p>先在电脑点击“生成手机查看文件”，把下载的文件传到这台手机，再从这里导入。</p>
       <MobileImportButton onImportFile={onImportFile} label="选择手机查看文件" />
-      <div className="mobile-empty-note"><strong>只导入查看摘要</strong><span>不会修改电脑工作台；正式数据仍只能在电脑更新。</span></div>
+      <div className="mobile-empty-note"><strong>手机只会显示简要内容</strong><span>导入不会修改电脑工作台；学生、成绩、课表和事项仍在电脑更新。</span></div>
       {message ? <p className="form-error" role="status">{message}</p> : null}
     </main>
   );
 }
 
-function MobileReadOnlyWorkbench({ content, onImportFile }: { content: MobileReadOnlySnapshot; onImportFile: (file: File) => void | Promise<void> }) {
+function MobileReadOnlyWorkbench({ content, onImportFile, message }: { content: MobileReadOnlySnapshot; onImportFile: (file: File) => void | Promise<void>; message?: string }) {
   const [section, setSection] = useState<"today" | "students" | "teaching" | "tasks" | "capture">("today");
   const [query, setQuery] = useState("");
   const [inbox, setInbox] = useState<InboxItem[]>(() => {
     if (typeof window === "undefined") return [];
     try {
       const raw = window.localStorage.getItem(INBOX_STORAGE_KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
+      return raw && raw !== "[]" ? parseInbox(raw) : [];
     } catch {
       return [];
     }
@@ -2197,12 +2247,15 @@ function MobileReadOnlyWorkbench({ content, onImportFile }: { content: MobileRea
   const [captureCategory, setCaptureCategory] = useState<TaskCategory>("学生");
   const [captureMsg, setCaptureMsg] = useState("");
 
-  function persistInbox(items: InboxItem[]) {
-    setInbox(items);
+  function persistInbox(items: InboxItem[]): boolean {
     try {
+      const stored = window.localStorage.getItem(INBOX_STORAGE_KEY);
+      if (stored && stored !== "[]") parseInbox(stored);
       window.localStorage.setItem(INBOX_STORAGE_KEY, JSON.stringify(items));
+      setInbox(items);
+      return true;
     } catch {
-      // 手机本地写入失败时仅内存保留。
+      return false;
     }
   }
 
@@ -2210,17 +2263,18 @@ function MobileReadOnlyWorkbench({ content, onImportFile }: { content: MobileRea
     const text = captureText.trim();
     if (!text) return;
     const item: InboxItem = { id: `N-${Date.now()}`, text, category: captureCategory, createdAt: new Date().toISOString() };
-    persistInbox([item, ...inbox]);
-    setCaptureText("");
-    setCaptureMsg("已存到这台手机，回家在电脑一键导入。");
-    window.setTimeout(() => setCaptureMsg(""), 2500);
+    const saved = persistInbox([item, ...inbox]);
+    if (saved) setCaptureText("");
+    setCaptureMsg(saved
+      ? "已保存到这台手机，之后可以在电脑粘贴并导入。"
+      : "没有保存成功，输入内容仍在。请先复制保存；手机存储不可用或旧速记无法读取时，不会覆盖原内容。");
   }
 
   function copyInbox() {
     const payload = serializeInbox(inbox);
     if (navigator.clipboard?.writeText) {
       void navigator.clipboard.writeText(payload)
-        .then(() => setCaptureMsg("已复制，回家在电脑粘贴导入。"))
+        .then(() => setCaptureMsg("已复制，之后在电脑粘贴并导入。"))
         .catch(() => {
           window.prompt("请长按复制下面的速记内容：", payload);
           setCaptureMsg("请复制弹窗中的内容，再到电脑导入。");
@@ -2236,46 +2290,47 @@ function MobileReadOnlyWorkbench({ content, onImportFile }: { content: MobileRea
   const tasks = content.openTasks.filter((task) => `${task.title}${task.category}${task.relatedLabel ?? ""}`.includes(normalized));
   return (
     <div className="mobile-readonly-workbench" data-accent={content.accent}>
+      {message ? <p className="mobile-import-message" role="status">{message}</p> : null}
       <header className="mobile-readonly-header"><span className="brand-mark">{content.workbenchName.slice(0, 1)}</span><span><strong>{content.workbenchName}</strong><small>手机查看版 · 生成于 {formatDateTime(content.generatedAt)}</small></span><MobileImportButton onImportFile={onImportFile} /></header>
-      <label className="mobile-readonly-search"><NavIcon name="search" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、课次或事项" /></label>
+      <label className="mobile-readonly-search"><NavIcon name="search" aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学生、课程或事项" /></label>
       {normalized ? (
-        <section className="mobile-search-panel"><h2>搜索结果</h2>{students.map((student) => <button type="button" key={student.id} onClick={() => { setSection("students"); setQuery(""); }}><Pill tone="sage">学生</Pill><span><strong>{student.name}</strong><small>{student.className} · {student.issueTitle ?? "暂无近期关注"}</small></span></button>)}{lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => { setSection("teaching"); setQuery(""); }}><Pill tone="blue">课次</Pill><span><strong>{lesson.title}</strong><small>{lesson.className} · {formatDateTime(lesson.startsAt)}</small></span></button>)}{tasks.map((task) => <button type="button" key={task.id} onClick={() => { setSection("tasks"); setQuery(""); }}><Pill tone="apricot">事项</Pill><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)}</small></span></button>)}{!students.length && !lessons.length && !tasks.length ? <p>没有找到相关内容</p> : null}</section>
+        <section className="mobile-search-panel"><h2>搜索结果</h2>{students.map((student) => <button type="button" key={student.id} onClick={() => { setSection("students"); setQuery(""); }}><Pill tone="sage">学生</Pill><span><strong>{student.name}</strong><small>{student.className} · {student.issueTitle ?? "暂无近期关注"}</small></span></button>)}{lessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => { setSection("teaching"); setQuery(""); }}><Pill tone="blue">课程</Pill><span><strong>{lesson.title}</strong><small>{lesson.className} · {formatDateTime(lesson.startsAt)}</small></span></button>)}{tasks.map((task) => <button type="button" key={task.id} onClick={() => { setSection("tasks"); setQuery(""); }}><Pill tone="apricot">事项</Pill><span><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)}</small></span></button>)}{!students.length && !lessons.length && !tasks.length ? <p>没有找到相关内容</p> : null}</section>
       ) : (
         <main className="mobile-readonly-content">
-          {section === "today" ? <><SectionHeader eyebrow="今日概览" title={`还有 ${content.summary.openTasks} 件事`} description={`预计需要 ${formatMinutes(content.summary.openTaskMinutes)}，手机仅供查询查看。`} /><div className="mobile-summary-grid"><div><small>重点学生</small><strong>{content.priorityStudents.length}</strong></div><div><small>待上课</small><strong>{content.upcomingLessons.length}</strong></div><div><small>近期关注</small><strong>{content.summary.issuesPending}</strong></div></div><section className="mobile-content-card"><h2>最近事项</h2>{content.openTasks.slice(0, 4).map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · {task.relatedLabel ?? "未关联"}</small></article>)}</section></> : null}
+          {section === "today" ? <><SectionHeader eyebrow="今日概览" title={`还有 ${content.summary.openTasks} 件事`} description={`预计需要 ${formatMinutes(content.summary.openTaskMinutes)}，手机仅供查询查看。`} /><div className="mobile-summary-grid"><div><small>重点学生</small><strong>{content.priorityStudents.length}</strong></div><div><small>待上课</small><strong>{content.upcomingLessons.length}</strong></div><div><small>近期关注</small><strong>{content.summary.issuesPending}</strong></div></div><section className="mobile-content-card"><h2>最近事项</h2>{content.openTasks.slice(0, 4).map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · {task.relatedLabel ?? "未填写学生或班级"}</small></article>)}</section></> : null}
           {section === "students" ? <><SectionHeader eyebrow="重点关注" title="学生动态" description="查看最新成绩、排名变化和近期关注。" /><section className="mobile-content-card">{content.priorityStudents.map((student) => <article key={student.id}><div className="mobile-student-title"><span className="avatar avatar-sage avatar-small">{student.name.slice(-2)}</span><span><strong>{student.name}</strong><small>{student.className}</small></span></div><div className="mobile-student-metrics"><span><small>成绩</small><strong>{student.latestScore ?? "—"}/{student.latestMaxScore ?? "—"}</strong></span><span><small>排名</small><strong>{student.currentRank ? `第${student.currentRank}` : "—"}</strong></span><span><small>变化</small><strong>{formatChange(student.rankDelta, "名")}</strong></span></div><p>{student.issueStatus ?? "暂无"} · {student.issueTitle ?? "当前没有需关注"}</p></article>)}</section></> : null}
           {section === "teaching" ? <><SectionHeader eyebrow="接下来" title="课表" description="查看时间、班级、地点与备课清单。" /><section className="mobile-content-card">{content.upcomingLessons.map((lesson) => <article key={lesson.id}><Pill tone="blue">{lesson.subject}</Pill><strong>{lesson.title}</strong><small>{formatDateTime(lesson.startsAt)}—{formatTime(lesson.endsAt)}</small><small>{lesson.className} · {lesson.room}</small><p>{lesson.preparation}</p></article>)}</section></> : null}
-          {section === "tasks" ? <><SectionHeader eyebrow="按截止时间" title="事项" description="完成和修改请回到电脑。" /><section className="mobile-content-card">{content.openTasks.map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · 约 {formatMinutes(task.estimatedMinutes)}</small><small>{task.relatedLabel ?? "未关联"}</small></article>)}</section></> : null}
+          {section === "tasks" ? <><SectionHeader eyebrow="按截止时间" title="事项" description="完成和修改请回到电脑。" /><section className="mobile-content-card">{content.openTasks.map((task) => <article key={task.id}><Pill tone={toneForTask(task.category)}>{task.category}</Pill><strong>{task.title}</strong><small>{formatDateTime(task.dueAt)} · 约 {formatMinutes(task.estimatedMinutes)}</small><small>{task.relatedLabel ?? "未填写学生或班级"}</small></article>)}</section></> : null}
           {section === "capture" ? (
             <>
-              <SectionHeader eyebrow="随手记" title="手机速记" description="记在这台手机上，回家在电脑一键导入为事项。" />
+              <SectionHeader eyebrow="随手记" title="手机速记" description="先记在这台手机上，之后在电脑粘贴并导入为事项。" />
               <section className="mobile-content-card capture-card">
                 <textarea value={captureText} onChange={(e) => setCaptureText(e.target.value)} placeholder="例如:明天提醒李明澈带阅读单" aria-label="速记内容" />
                 <div className="capture-row">
                   <select value={captureCategory} onChange={(e) => setCaptureCategory(e.target.value as TaskCategory)} aria-label="速记类别"><option>学生</option><option>教学</option><option>行政</option><option>论文</option></select>
                   <button type="button" className="button button-primary" onClick={saveCapture} disabled={!captureText.trim()}>存速记</button>
                 </div>
-                {captureMsg ? <p className="capture-msg">{captureMsg}</p> : null}
+                {captureMsg ? <p className="capture-msg" role="status">{captureMsg}</p> : null}
               </section>
               {inbox.length ? (
                 <section className="mobile-content-card">
                   <div className="capture-list-head"><h2>已存 {inbox.length} 条</h2><button type="button" className="text-button" onClick={copyInbox}>复制速记</button></div>
                   {inbox.map((item) => <article key={item.id}><Pill tone={toneForTask(item.category)}>{item.category}</Pill><strong>{item.text}</strong><small>{formatDateTime(item.createdAt)}</small></article>)}
-                  <button type="button" className="text-button wide" onClick={() => persistInbox([])}>清空速记</button>
+                  <button type="button" className="text-button wide" onClick={() => { if (window.confirm("确认清空手机上的全部速记吗？请先复制到电脑，清空后无法撤销。")) setCaptureMsg(persistInbox([]) ? "手机速记已清空。" : "没有清空成功，原速记仍被保留。"); }}>清空速记</button>
                 </section>
               ) : null}
             </>
           ) : null}
         </main>
       )}
-      <nav className="mobile-readonly-nav" aria-label="手机查看导航"><button type="button" className={section === "today" ? "active" : ""} onClick={() => setSection("today")}><NavIcon name="today" /><small>今日</small></button><button type="button" className={section === "students" ? "active" : ""} onClick={() => setSection("students")}><NavIcon name="students" /><small>学生</small></button><button type="button" className={section === "teaching" ? "active" : ""} onClick={() => setSection("teaching")}><NavIcon name="teaching" /><small>课表</small></button><button type="button" className={section === "tasks" ? "active" : ""} onClick={() => setSection("tasks")}><NavIcon name="tasks" /><small>事项</small></button><button type="button" className={section === "capture" ? "active" : ""} onClick={() => setSection("capture")}><NavIcon name="capture" /><small>速记</small></button></nav>
+      <nav className="mobile-readonly-nav" aria-label="手机查看导航"><button type="button" className={section === "today" ? "active" : ""} onClick={() => { setSection("today"); setQuery(""); }}><NavIcon name="today" /><small>今日</small></button><button type="button" className={section === "students" ? "active" : ""} onClick={() => { setSection("students"); setQuery(""); }}><NavIcon name="students" /><small>学生</small></button><button type="button" className={section === "teaching" ? "active" : ""} onClick={() => { setSection("teaching"); setQuery(""); }}><NavIcon name="teaching" /><small>课表</small></button><button type="button" className={section === "tasks" ? "active" : ""} onClick={() => { setSection("tasks"); setQuery(""); }}><NavIcon name="tasks" /><small>事项</small></button><button type="button" className={section === "capture" ? "active" : ""} onClick={() => { setSection("capture"); setQuery(""); }}><NavIcon name="capture" /><small>速记</small></button></nav>
     </div>
   );
 }
 
-const ASSESSMENT_IMPORT_HINT = "姓名,班级,测评,日期,满分,成绩,排名,参考人数,班级均分";
+const ASSESSMENT_IMPORT_HINT = "学生姓名,班级,测评名称,日期,满分,成绩,班级排名,班级人数,班级平均分";
 const ASSESSMENT_IMPORT_EXAMPLE = "王小明,八年级1班,单元三,2026-10-12,100,87,6,45,79.5";
-const LESSON_IMPORT_HINT = "标题,学科,班级,日期,开始,结束,地点,备课,提醒分钟";
+const LESSON_IMPORT_HINT = "课题,学科,班级,上课日期,开始时间,结束时间,教室,备课清单,课前提醒";
 const LESSON_IMPORT_EXAMPLE = "说明文阅读,语文,八年级1班,2026-10-13,08:55,09:40,教学楼 401,阅读材料,10";
 
 function ImportModal({
@@ -2302,7 +2357,7 @@ function ImportModal({
       setAssessmentPlan(planAssessmentImport(text, data.students, { defaultSubject: data.user.subjects[0] ?? "语文" }));
       setLessonPlan(null);
     } else {
-      setLessonPlan(planLessonImport(text, data.lessons));
+      setLessonPlan(planLessonImport(text, data.lessons, data));
       setAssessmentPlan(null);
     }
     setStep("review");
@@ -2319,14 +2374,14 @@ function ImportModal({
   return (
     <Modal
       title={isAssessment ? "导入名单与测评" : "导入课表"}
-      subtitle="粘贴表格内容，先核对再保存；导入失败的行不会影响现有数据。"
+      subtitle="粘贴表格内容，先确认再保存；填写有误的行不会影响现有内容。"
       onClose={onClose}
       wide
     >
       <div className="stepper" aria-label="导入步骤">
         <span className={step === "paste" ? "active" : ""}><i>1</i> 粘贴内容</span>
         <b />
-        <span className={step === "review" ? "active" : ""}><i>2</i> 核对并保存</span>
+        <span className={step === "review" ? "active" : ""}><i>2</i> 确认并保存</span>
       </div>
 
       {step === "paste" ? (
@@ -2340,7 +2395,7 @@ function ImportModal({
           />
           <div className="modal-actions">
             <button type="button" className="button button-ghost" onClick={onClose}>取消</button>
-            <button type="button" className="button button-primary" disabled={!text.trim()} onClick={parse}>解析表格</button>
+            <button type="button" className="button button-primary" disabled={!text.trim()} onClick={parse}>检查内容</button>
           </div>
         </div>
       ) : (
@@ -2348,7 +2403,7 @@ function ImportModal({
           <div className="review-banner">
             <NavIcon name="tasks" />
             <div>
-              <strong>识别到 {validCount} 条可导入记录{assessmentPlan?.newStudentCount ? `，其中 ${assessmentPlan.newStudentCount} 名新学生` : ""}</strong>
+              <strong>可以导入 {validCount} 条记录{assessmentPlan?.newStudentCount ? `，其中 ${assessmentPlan.newStudentCount} 名新学生` : ""}</strong>
               <small>{issues.length ? `另有 ${issues.length} 行需要修正后才能导入` : "所有行都通过了检查"}</small>
             </div>
           </div>
@@ -2356,7 +2411,7 @@ function ImportModal({
           {issues.length ? (
             <div className="import-issues" role="alert">
               {issues.slice(0, 8).map((issue, index) => (
-                <p key={`${issue.rowNumber}-${index}`}><strong>第 {issue.rowNumber} 行 · {issue.field}</strong>{issue.message}</p>
+                <p key={`${issue.rowNumber}-${index}`}><strong>{issue.rowNumber > 0 ? `第 ${issue.rowNumber} 行 · ` : ""}{issue.field}</strong>{issue.message}</p>
               ))}
               {issues.length > 8 ? <p><strong>…</strong>其余 {issues.length - 8} 行问题请在表格中一并修正。</p> : null}
             </div>
@@ -2371,7 +2426,7 @@ function ImportModal({
                     <span><strong>{entry.studentName}</strong><small>{entry.className}</small></span>
                     <span><strong>{entry.record.title}</strong><small>{entry.record.occurredOn}</small></span>
                     <span><strong>{entry.record.score}/{entry.record.maxScore}</strong><small>第 {entry.record.rank} / {entry.record.cohortSize}</small></span>
-                    <Pill tone="apricot">待核对</Pill>
+                    <Pill tone="apricot">待确认</Pill>
                   </div>
                 ))
                 : lessonPlan?.entries.slice(0, 5).map((entry, index) => (
@@ -2386,7 +2441,7 @@ function ImportModal({
             </div>
           ) : null}
 
-          <p className="form-note"><span aria-hidden="true">i</span> 保存后{isAssessment ? "新测评标记为“待核对”，核对后才会计入进退步" : "新课次会进入本周课表与提醒"}；重复或超出范围的行不会被保存。</p>
+          <p className="form-note"><span aria-hidden="true">i</span> 保存后{isAssessment ? "新成绩会先放在“待确认成绩”里，确认后才会用于比较进退步" : "新课程会显示在对应日期的课表并按设置提醒"}；重复或填写有误的行不会被保存。</p>
           <div className="modal-actions">
             <button type="button" className="button button-ghost" onClick={() => setStep("paste")}>返回修改</button>
             <button type="button" className="button button-primary" disabled={!validCount} onClick={confirm}>确认导入 {validCount} 条</button>
@@ -2441,8 +2496,8 @@ function DataManageModal({
         setInboxDone(count);
         setInboxText("");
       }
-    } catch (error) {
-      setInboxError(error instanceof Error ? error.message : "没有识别到速记内容。");
+    } catch {
+      setInboxError("没有识别到手机速记。请先在手机点击“复制速记”，再粘贴到这里。");
     }
   }
 
@@ -2463,21 +2518,21 @@ function DataManageModal({
           tasks: result.data.tasks.length,
           warnings: result.warnings,
         });
-      } catch (error) {
-        setFileError(error instanceof Error ? error.message : "文件无法识别。");
+      } catch {
+        setFileError("这个文件无法恢复，请选择从本工作台导出的完整备份；现有内容没有改变。");
       }
     });
     input.value = "";
   }
 
   return (
-    <Modal title="数据与备份" subtitle="数据存在这台电脑上、不联网，记得导出一份留底。" onClose={onClose} wide>
+    <Modal title="数据与备份" subtitle="工作台内容保存在这台电脑当前使用的浏览器里，不会自动上传；记得另存一份备份。" onClose={onClose} wide>
       <div className="data-manage">
         <section className="data-section">
-          <div className="data-section-head"><h3>导出备份</h3><p>导出后可以拷贝到其他设备，或交给系统日历使用。</p></div>
+          <div className="data-section-head"><h3>导出备份</h3><p>可以导出完整备份，也可以下载课表与事项的日历文件。</p></div>
           <div className="data-actions-row">
-            <button type="button" className="button button-soft" onClick={onExportData}>导出数据文件 (.json)</button>
-            <button type="button" className="button button-ghost" onClick={onExportCalendar}>导出日历 (.ics)</button>
+            <button type="button" className="button button-soft" onClick={onExportData}>导出完整备份</button>
+            <button type="button" className="button button-ghost" onClick={onExportCalendar}>下载日历文件</button>
           </div>
         </section>
 
@@ -2490,7 +2545,7 @@ function DataManageModal({
           {pendingFile ? (
             <div className="restore-preview">
               <p><strong>{pendingFile.name}</strong></p>
-              <p>包含 {pendingFile.students} 名学生、{pendingFile.lessons} 节课次、{pendingFile.tasks} 件事项。恢复会覆盖当前工作区，当前版本会自动存入备份。</p>
+              <p>包含 {pendingFile.students} 名学生、{pendingFile.lessons} 节课程、{pendingFile.tasks} 件事项。恢复后会替换当前工作台的全部内容，包括老师设置、学生、课表、事项和资料；恢复前会先备份当前内容。</p>
               {pendingFile.warnings.length ? <div className="restore-warnings" role="status"><strong>恢复前请注意</strong><ul>{pendingFile.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></div> : null}
               <div className="data-actions-row">
                 <button type="button" className="button button-primary" onClick={() => { if (onRestoreFile(pendingFile.text, pendingFile.name)) setPendingFile(null); }}>确认恢复</button>
@@ -2501,13 +2556,13 @@ function DataManageModal({
         </section>
 
         <section className="data-section">
-          <div className="data-section-head"><h3>本机自动备份</h3><p>每次保存前自动保留上一版本，最多保留 3 份。</p></div>
+          <div className="data-section-head"><h3>自动备份</h3><p>每次保存前自动保留修改前的内容，最多保留 3 份。</p></div>
           {backups.length ? (
             <div className="backup-list">
               {backups.map((entry) => (
                 <div key={`${entry.savedAt}-${entry.revision}`} className="backup-row">
-                  <span><strong>{formatDateTime(entry.savedAt)}</strong><small>第 {entry.revision} 版</small></span>
-                  <button type="button" className="button button-ghost" onClick={() => onRestoreBackup(entry)}>恢复此版本</button>
+                  <span><strong>{formatDateTime(entry.savedAt)}</strong><small>修改前的内容</small></span>
+                  <button type="button" className="button button-ghost" onClick={() => { if (window.confirm(`恢复到 ${formatDateTime(entry.savedAt)} 的备份会替换当前全部内容。继续吗？`)) onRestoreBackup(entry); }}>恢复到这里</button>
                 </div>
               ))}
             </div>
@@ -2515,17 +2570,17 @@ function DataManageModal({
         </section>
 
         <section className="data-section">
-          <div className="data-section-head"><h3>手机速记导入</h3><p>把手机上“复制速记”的内容粘贴到这里，一键存为待办事项。</p></div>
-          <textarea className="inbox-paste" value={inboxText} onChange={(e) => setInboxText(e.target.value)} placeholder="在手机上点“复制速记”，回家粘贴到这里" aria-label="粘贴手机速记" />
+          <div className="data-section-head"><h3>手机速记导入</h3><p>把手机上“复制速记”的内容粘贴到这里，存为待办事项。</p></div>
+          <textarea className="inbox-paste" value={inboxText} onChange={(e) => setInboxText(e.target.value)} placeholder="在手机上点“复制速记”，之后在电脑粘贴到这里" aria-label="粘贴手机速记" />
           {inboxError ? <p className="form-error" role="alert">{inboxError}</p> : null}
           {inboxDone ? <p className="capture-ok">已导入 {inboxDone} 条速记为待办事项。</p> : null}
           <div className="data-actions-row">
-            <button type="button" className="button button-soft" disabled={!inboxText.trim()} onClick={importInboxNow}>一键导入速记</button>
+            <button type="button" className="button button-soft" disabled={!inboxText.trim()} onClick={importInboxNow}>导入速记</button>
           </div>
         </section>
 
         <section className="data-section">
-          <div className="data-section-head"><h3>提醒</h3><p>页面打开时会弹出课次与事项提醒，也可以交给系统通知。</p></div>
+          <div className="data-section-head"><h3>提醒</h3><p>工作台打开时会提醒；允许系统通知后，也会在电脑上收到提醒。</p></div>
           <div className="data-actions-row">
             <button type="button" className="button button-soft" onClick={onEnableNotifications}>开启系统通知</button>
           </div>
@@ -2533,7 +2588,7 @@ function DataManageModal({
 
         {data.meta.containsDemoData ? (
           <section className="data-section danger">
-            <div className="data-section-head"><h3>清除演示数据</h3><p>开始使用真实数据前，先清空虚构的学生、课次、事项和资料。</p></div>
+            <div className="data-section-head"><h3>清除演示数据</h3><p>开始使用自己的内容前，先清空虚构的学生、课程、事项和资料。</p></div>
             {!confirmClear ? (
               <div className="data-actions-row">
                 <button type="button" className="button button-ghost" onClick={() => setConfirmClear(true)}>我要清除演示数据…</button>
@@ -2541,7 +2596,7 @@ function DataManageModal({
             ) : (
               <div className="restore-preview danger-zone">
                 <p><strong>清除后将得到一本空白工作台</strong></p>
-                <p>学生、课次、事项和资料都会被清空，老师信息与工作台名称保留。当前版本会自动存入备份，可以随时恢复。</p>
+                <p>学生、课程、事项和资料都会被清空，老师信息与工作台名称保留。清空前会先备份当前演示内容，可以随时恢复。</p>
                 <div className="data-actions-row">
                   <button type="button" className="button button-primary" onClick={onClearDemo}>确认清除</button>
                   <button type="button" className="button button-ghost" onClick={() => setConfirmClear(false)}>再想想</button>
@@ -2578,12 +2633,12 @@ function SettingsModal({ data, onClose, onSave, onAccent }: { data: WorkbenchDat
   }
 
   return (
-    <Modal title="工作台设置" subtitle="这些信息只存在这台电脑上，用来显示和导出。" onClose={onClose}>
+    <Modal title="工作台设置" subtitle="这些信息只保存在当前浏览器里，用来显示和导出。" onClose={onClose}>
       <form className="quick-form" onSubmit={submit}>
         <label>工作台名称<input name="workbenchName" required defaultValue={data.user.workbenchName} /></label>
         <div>
-          <p className="theme-label">品牌色（点击立即换肤）</p>
-          <div className="theme-switcher" role="group" aria-label="品牌色">
+          <p className="theme-label">主题颜色（点击即可更换）</p>
+          <div className="theme-switcher" role="group" aria-label="主题颜色">
             {(["松柏绿", "黛蓝", "暖橙"] as const).map((tone) => (
               <button
                 key={tone}
@@ -2604,7 +2659,7 @@ function SettingsModal({ data, onClose, onSave, onAccent }: { data: WorkbenchDat
           <label>身份说明<input name="roleLabel" defaultValue={data.user.roleLabel} placeholder="例如：初中语文教师 · 班主任" /></label>
           <label>学段<select name="schoolStage" defaultValue={data.user.schoolStage}><option>小学</option><option>初中</option><option>高中</option><option>教培</option></select></label>
           <label>任教学科<input name="subjects" required defaultValue={data.user.subjects.join("、")} placeholder="例如：语文、班会" /></label>
-          <label>头像标记<input name="avatarMark" maxLength={2} defaultValue={data.user.appearance.avatarMark} placeholder="一个字" /></label>
+          <label>头像上的字<input name="avatarMark" maxLength={2} defaultValue={data.user.appearance.avatarMark} placeholder="一个字" /></label>
         </div>
         {error ? <p className="form-error" role="alert">{error}</p> : null}
         <div className="modal-actions"><button type="button" className="button button-ghost" onClick={onClose}>取消</button><button type="submit" className="button button-primary">保存设置</button></div>
@@ -2672,10 +2727,10 @@ function OnboardingIllustration({ step }: { step: "welcome" | "teacher" | "subje
 
 const ONBOARDING_STEPS = [
   { key: "welcome", title: "把工作台变成你自己的", subtitle: "几分钟配置，之后每天打开就能直接用。" },
-  { key: "teacher", title: "先认识一下", subtitle: "工作台名称和你的称呼，会显示在桌面与手机上。" },
-  { key: "subjects", title: "你教什么", subtitle: "学段和学科决定默认值，之后可以改。" },
-  { key: "brand", title: "选一个标记", subtitle: "一个字作为头像标记，出现在侧栏和导出文件里。" },
-  { key: "ready", title: "准备就绪", subtitle: "完成配置后，演示数据会被清空，你可以导入真实名单与课表。" },
+  { key: "teacher", title: "先认识一下", subtitle: "工作台名称会显示在电脑和手机，老师称呼显示在电脑端。" },
+  { key: "subjects", title: "你教什么", subtitle: "先填好学段和学科，之后录成绩和课表时可以少重复输入。" },
+  { key: "brand", title: "选一个头像文字", subtitle: "选一两个字，显示在左侧的个人位置。" },
+  { key: "ready", title: "准备就绪", subtitle: "完成配置后，演示数据会被清空，你可以导入自己的名单与课表。" },
 ] as const;
 
 function OnboardingWizard({
@@ -2694,6 +2749,7 @@ function OnboardingWizard({
     avatarMark: string;
   }) => void;
 }) {
+  const dialogRef = useDialogFocus(onClose);
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [form, setForm] = useState({
@@ -2738,7 +2794,7 @@ function OnboardingWizard({
 
   return (
     <div className="onboarding-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="onboarding-card" role="dialog" aria-modal="true" aria-label="首次配置向导" onMouseDown={(e) => e.stopPropagation()}>
+      <section ref={dialogRef} tabIndex={-1} className="onboarding-card" role="dialog" aria-modal="true" aria-label="首次配置向导" onMouseDown={(e) => e.stopPropagation()}>
         <div className="onboarding-art-panel">
           <OnboardingIllustration step={current.key} />
           <div className="onboarding-step-dots">
@@ -2759,8 +2815,8 @@ function OnboardingWizard({
 
             {current.key === "welcome" ? (
               <div className="onboarding-welcome-points">
-                <div><NavIcon name="students" /><div><strong>每天先做哪三件</strong><small>课次、事项、学生重点自动排好。</small></div></div>
-                <div><NavIcon name="teaching" /><div><strong>课表与备课一站看</strong><small>真实课次对应真实备课清单。</small></div></div>
+                <div><NavIcon name="students" /><div><strong>每天先做哪三件</strong><small>课程、事项、学生重点自动排好。</small></div></div>
+                <div><NavIcon name="teaching" /><div><strong>课表和备课放在一起</strong><small>点开每节课就能看到备课内容。</small></div></div>
                 <div><NavIcon name="tasks" /><div><strong>事项不再散落</strong><small>教学、学生、行政、论文一条时间线。</small></div></div>
                 <div><span>↻</span><div><strong>手机只看不改</strong><small>导入查看文件后，手机随时查阅。</small></div></div>
               </div>
@@ -2784,10 +2840,10 @@ function OnboardingWizard({
 
             {current.key === "brand" ? (
               <div className="onboarding-fields">
-                <label>头像标记<input value={form.avatarMark} maxLength={2} onChange={(e) => update("avatarMark", e.target.value)} placeholder="一个字" /></label>
+                <label>头像上的字<input value={form.avatarMark} maxLength={2} onChange={(e) => update("avatarMark", e.target.value)} placeholder="一个字" /></label>
                 <div className="onboarding-avatar-preview">
                   <span className="teacher-avatar">{form.avatarMark.trim() || form.workbenchName.trim().slice(0, 1) || "师"}</span>
-                  <span>预览：会显示在侧栏左下角与导出文件名。</span>
+                  <span>会显示在左侧的个人位置。</span>
                 </div>
               </div>
             ) : null}
@@ -2798,7 +2854,7 @@ function OnboardingWizard({
                 <div className="ready-row"><span>老师</span><strong>{form.teacherName.trim() || "—"}</strong></div>
                 <div className="ready-row"><span>学段学科</span><strong>{form.schoolStage} · {form.subjects || "—"}</strong></div>
                 <div className="ready-row"><span>头像</span><strong>{form.avatarMark.trim() || "师"}</strong></div>
-                <p className="onboarding-hint ready-note"><span aria-hidden="true">i</span> 完成后虚构演示数据会被清空，得到一本属于你的空白工作台。当前演示版本会自动存入备份，可随时恢复。</p>
+                <p className="onboarding-hint ready-note"><span aria-hidden="true">i</span> 完成后虚构演示数据会被清空，得到一本属于你的空白工作台。清空前会先备份当前演示内容，可随时恢复。</p>
               </div>
             ) : null}
 
@@ -2835,7 +2891,7 @@ function TrendChart({ points }: { points: ReturnType<typeof getScoreRateSeries> 
   const avgLine = points.map((point, index) => `${index === 0 ? "M" : "L"}${xFor(index).toFixed(1)},${yFor(point.classAverage).toFixed(1)}`).join(" ");
 
   if (!points.length) {
-    return <div className="trend-empty">还没有已核对的测评记录</div>;
+    return <div className="trend-empty">还没有老师确认过的成绩</div>;
   }
 
   return (
@@ -2934,12 +2990,12 @@ function StudentDetailView({
 
         <aside className="detail-side">
           <section className="card insights-card">
-            <div className="subheading"><div><h3>统计结论</h3><p>由本机规则计算，保存前由老师核对。</p></div></div>
+            <div className="subheading"><div><h3>成绩变化提示</h3><p>根据老师确认过的同科成绩自动整理，仅供参考。</p></div></div>
             {insights.length ? (
               <ul className="insights-list">
                 {insights.map((insight) => <li key={insight}>{insight}</li>)}
               </ul>
-            ) : <p className="data-empty">还没有足够的已核对测评生成结论。</p>}
+            ) : <p className="data-empty">至少需要两次同科成绩，才能比较变化。</p>}
             {signals.length ? (
               <div className="insight-signals">
                 {signals.map((signal) => (
@@ -2952,11 +3008,11 @@ function StudentDetailView({
           <section className="card detail-issue-card">
             <div className="subheading"><h3>近期问题</h3><Pill tone={toneForIssue(student.recentIssue?.status)}>{student.recentIssue?.status ?? "暂无"}</Pill></div>
             <p>{student.recentIssue?.detail ?? "当前没有待跟进问题。"}</p>
-            <div className="issue-next"><small>下一步</small><strong>{student.recentIssue?.nextAction ?? "暂无安排"}</strong></div>
+            <div className="issue-next"><small>下次怎么跟进</small><strong>{student.recentIssue?.nextAction ?? "暂无安排"}</strong>{student.recentIssue?.followUpOn ? <span>计划跟进：{student.recentIssue.followUpOn}</span> : null}</div>
           </section>
 
           <section className="card detail-home-card">
-            <div className="subheading"><div><h3>家校协同</h3><p>由老师手动选择</p></div></div>
+            <div className="subheading"><div><h3>家校沟通</h3><p>按最近一次沟通情况记录</p></div></div>
             <div className="rating-block">
               <div className="rating-title"><span>沟通难度</span><strong>{COMMUNICATION_DIFFICULTY_LABELS[student.homeSchool.communicationDifficulty]}</strong></div>
               <div className="rating-options" role="group" aria-label="家长沟通难度">
@@ -2964,8 +3020,8 @@ function StudentDetailView({
               </div>
             </div>
             <div className="rating-block">
-              <div className="rating-title"><span>家长辅助意愿</span><strong>{SUPPORT_WILLINGNESS_LABELS[student.homeSchool.supportWillingness]}</strong></div>
-              <div className="rating-options support" role="group" aria-label="家长辅助意愿">
+              <div className="rating-title"><span>家长配合意愿</span><strong>{SUPPORT_WILLINGNESS_LABELS[student.homeSchool.supportWillingness]}</strong></div>
+              <div className="rating-options support" role="group" aria-label="家长配合意愿">
                 {SUPPORT_WILLINGNESS_LABELS.slice(1).map((label, index) => <button type="button" key={label} disabled={readOnly} className={student.homeSchool.supportWillingness === index + 1 ? "active" : ""} onClick={() => onParentSupport((index + 1) as 1 | 2 | 3 | 4 | 5)}><span>{index + 1}</span><small>{label}</small></button>)}
               </div>
             </div>

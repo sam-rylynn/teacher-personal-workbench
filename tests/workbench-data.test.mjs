@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DESKTOP_DEVICE_LOCAL_ACCESS,
   MOBILE_READ_ONLY_ACCESS,
+  WORKBENCH_BACKUP_KEY,
   WORKBENCH_STORAGE_KEY,
   applyWorkbenchUpdate,
   checkWorkbenchWriteAccess,
@@ -98,6 +99,137 @@ test("default workbench summary is calculated from the seed records", () => {
         10,
     ) / 10;
   assert.equal(summary.averageLatestScoreRate, expectedAverage);
+});
+
+test("stored fictional preview copy refreshes without changing teacher-written text", () => {
+  const data = createSeedWorkbenchData();
+  delete data.meta.demoCopyVersion;
+  const student = data.students.find((candidate) => candidate.id === "S08403");
+  assert.ok(student?.recentIssue);
+  student.recentIssue.title = "文本依据仍不充分";
+  student.recentIssue.detail = "解释动作描写的情感作用时，答案缺少对应原句。";
+  student.recentIssue.nextAction = "课堂比较任务中再次核对是否能先标原句再作答。";
+  student.homeSchool.communicationNote = "老师自己补写的沟通记录";
+  data.tasks.find((task) => task.id === "T004").title = "核对赵清禾补学清单剩余阅读题";
+  const teacherStudent = structuredClone(student);
+  teacherStudent.id = "REAL-001";
+  teacherStudent.name = "老师新增学生";
+  teacherStudent.assessments = [];
+  teacherStudent.recentIssue.id = "REAL-I001";
+  teacherStudent.recentIssue.title = "写作第二稿尚未提交";
+  data.students.push(teacherStudent);
+  const teacherTask = structuredClone(data.tasks[0]);
+  teacherTask.id = "REAL-T001";
+  teacherTask.title = "核对赵清禾补学清单剩余阅读题";
+  data.tasks.push(teacherTask);
+
+  const refreshed = migrateWorkbenchData(data, "2026-10-01T10:00:00+08:00").data;
+  const refreshedStudent = refreshed.students.find((candidate) => candidate.id === "S08403");
+  assert.equal(refreshedStudent?.recentIssue?.title, "回答时没有引用原文");
+  assert.equal(refreshedStudent?.recentIssue?.detail, "说到人物情感时，常直接写结论，没有先找出原文中的对应句子。");
+  assert.equal(refreshedStudent?.recentIssue?.nextAction, "下次讲评时，让他先画出原句，再说这句话表现了什么情感。");
+  assert.equal(refreshedStudent?.homeSchool.communicationNote, "老师自己补写的沟通记录");
+  assert.equal(refreshed.tasks.find((task) => task.id === "T004")?.title, "查看赵清禾补写的阅读题");
+  assert.equal(refreshed.students.find((candidate) => candidate.id === "REAL-001")?.recentIssue?.title, "写作第二稿尚未提交");
+  assert.equal(refreshed.tasks.find((task) => task.id === "REAL-T001")?.title, "核对赵清禾补学清单剩余阅读题");
+
+  const nonDemo = createSeedWorkbenchData();
+  nonDemo.meta.containsDemoData = false;
+  nonDemo.students[0].recentIssue.title = "文本依据仍不充分";
+  const untouched = migrateWorkbenchData(nonDemo, "2026-10-01T10:00:00+08:00").data;
+  assert.equal(untouched.students[0].recentIssue?.title, "文本依据仍不充分");
+});
+
+test("the one-time demo refresh never rewrites subsequent teacher edits or reused identities", () => {
+  const now = "2026-10-01T10:00:00+08:00";
+  const legacy = createSeedWorkbenchData();
+  delete legacy.meta.demoCopyVersion;
+  legacy.students[0].recentIssue.title = "文本依据仍不充分";
+  legacy.students[1].name = "老师自己添加的学生";
+  legacy.students[1].recentIssue.title = "补学清单还差1项确认";
+  legacy.students[2].recentIssue.id = "TEACHER-ISSUE";
+  legacy.students[2].recentIssue.title = "订正依据尚未补全";
+  legacy.students[3].id = "__proto__";
+
+  const refreshed = migrateWorkbenchData(legacy, now).data;
+  assert.equal(refreshed.meta.demoCopyVersion, 1);
+  assert.equal(refreshed.students[0].recentIssue.title, "回答时没有引用原文");
+  assert.equal(refreshed.students[1].recentIssue.title, "补学清单还差1项确认");
+  assert.equal(refreshed.students[2].recentIssue.title, "订正依据尚未补全");
+  const changed = applyWorkbenchUpdate(refreshed, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+    draft.students[0].recentIssue.title = "文本依据仍不充分";
+    draft.tasks.find((task) => task.id === "T004").title = "核对赵清禾补学清单剩余阅读题";
+  }, now);
+  assert.equal(changed.students[0].recentIssue.title, "文本依据仍不充分");
+
+  const storage = new MemoryStorage();
+  assert.equal(saveDeviceLocalWorkbench(changed, { access: DESKTOP_DEVICE_LOCAL_ACCESS, storage }).ok, true);
+  const reloaded = loadDeviceLocalWorkbench({ storage, now });
+  assert.equal(reloaded.data.students[0].recentIssue.title, "文本依据仍不充分");
+  assert.equal(reloaded.data.tasks.find((task) => task.id === "T004").title, "核对赵清禾补学清单剩余阅读题");
+});
+
+test("ordinary saves preserve unreadable data until an explicit restore or reset", () => {
+  const storage = new MemoryStorage();
+  const original = "{broken teacher records";
+  storage.setItem(WORKBENCH_STORAGE_KEY, original);
+  const loaded = loadDeviceLocalWorkbench({ storage });
+  assert.equal(loaded.source, "seed");
+  assert.ok(loaded.warnings.length);
+
+  const result = saveDeviceLocalWorkbench(loaded.data, { access: DESKTOP_DEVICE_LOCAL_ACCESS, storage });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "invalid-stored-data");
+  assert.equal(storage.getItem(WORKBENCH_STORAGE_KEY), original);
+  assert.equal(storage.getItem(WORKBENCH_BACKUP_KEY), null);
+
+  const recovered = createSeedWorkbenchData();
+  const restored = saveDeviceLocalWorkbench(recovered, {
+    access: DESKTOP_DEVICE_LOCAL_ACCESS,
+    storage,
+    allowReplaceInvalidStoredData: true,
+  });
+  assert.equal(restored.ok, true);
+  const savedValue = storage.getItem(WORKBENCH_STORAGE_KEY);
+  const invalid = structuredClone(recovered);
+  invalid.students[0].assessments[0].score = 999;
+  const invalidSave = saveDeviceLocalWorkbench(invalid, { access: DESKTOP_DEVICE_LOCAL_ACCESS, storage });
+  assert.equal(invalidSave.ok, false);
+  assert.equal(invalidSave.reason, "invalid-data");
+  assert.equal(storage.getItem(WORKBENCH_STORAGE_KEY), savedValue);
+});
+
+test("mobile snapshots use the teacher local day and compare real instants across offsets", () => {
+  const data = createSeedWorkbenchData({ includeMobileSnapshot: false });
+  const lesson = data.lessons[0];
+  data.lessons = [
+    { ...lesson, id: "LATE", startsAt: "2026-09-17T01:00:00Z", endsAt: "2026-09-17T02:00:00Z" },
+    { ...lesson, id: "EARLY", startsAt: "2026-09-17T08:00:00+08:00", endsAt: "2026-09-17T08:45:00+08:00" },
+    { ...lesson, id: "STARTED", startsAt: "2026-09-17T04:00:00+08:00", endsAt: "2026-09-17T06:00:00+08:00" },
+  ];
+  const task = data.tasks[0];
+  data.tasks = [
+    { ...task, id: "TASK-LATE", dueAt: "2026-09-17T01:00:00Z" },
+    { ...task, id: "TASK-EARLY", dueAt: "2026-09-17T08:00:00+08:00" },
+  ];
+  const snapshot = createMobileReadOnlySnapshot(data, "2026-09-16T20:30:00Z");
+  assert.equal(snapshot.summary.lessonsOnDate, 3);
+  assert.deepEqual(snapshot.upcomingLessons.map((item) => item.id), ["EARLY", "LATE"]);
+  assert.deepEqual(snapshot.openTasks.map((item) => item.id), ["TASK-EARLY", "TASK-LATE"]);
+});
+
+test("demo mobile snapshots keep their teaching reference time separate from the actual export time", () => {
+  const data = createSeedWorkbenchData({ includeMobileSnapshot: false });
+  const generatedAt = "2026-12-01T10:00:00Z";
+  const snapshot = createMobileReadOnlySnapshot(data, generatedAt, {
+    referenceNow: "2026-09-16T15:40:00+08:00",
+  });
+  assert.equal(snapshot.generatedAt, generatedAt);
+  assert.match(snapshot.snapshotId, /20261201100000$/);
+  assert.equal(snapshot.summary.lessonsOnDate, 3);
+  assert.equal(snapshot.upcomingLessons[0].startsAt, "2026-09-16T15:50:00+08:00");
+  assert.ok(snapshot.upcomingLessons.every((lesson) => lesson.status === "待上课"));
+  assert.equal(createMobileReadOnlySnapshot(data, generatedAt).upcomingLessons.length, 0);
 });
 
 test("task, assessment, and home-school changes survive a device-local save and reload", () => {
@@ -302,6 +434,15 @@ test("assessment changes compare only the latest subject and ignore pending reco
   differentMax.assessments[2].score = 96;
   assert.equal(getAssessmentChange(differentMax).scoreDelta, null, "raw score deltas must not compare different full scores");
   assert.equal(getAssessmentChange(differentMax).scoreRateDelta, 10);
+
+  const differentCohort = structuredClone(student);
+  differentCohort.assessments[2].cohortSize = 100;
+  assert.equal(getAssessmentChange(differentCohort).rankDelta, null, "class and grade rankings cannot be compared as one cohort");
+
+  const decimalScores = structuredClone(student);
+  decimalScores.assessments[0].score = 79.1;
+  decimalScores.assessments[2].score = 80.2;
+  assert.equal(getAssessmentChange(decimalScores).scoreDelta, 1.1);
 });
 
 test("assessment review commands confirm, keep pending, validate and delete exactly one record", () => {
@@ -406,4 +547,21 @@ test("strict restore rejects invalid time zones, duplicate identities and invali
     /INVALID_LEGACY_DATA/,
     "migration must validate its output before restore preview",
   );
+
+  const legacyWithUnreadableRecords = [
+    { students: { REAL: { name: "学生", className: "一班" } } },
+    { students: [{ id: "REAL", name: "学生", className: "一班", assessments: {} }] },
+    { students: [{ id: "REAL", name: "学生", className: "一班", assessments: [{ title: "测评", score: 999, maxScore: 100 }] }] },
+    { students: [{ id: "REAL", name: "学生" }] },
+    { tasks: [{ id: "REAL-TASK" }] },
+    { lessons: [{ id: "REAL-LESSON", title: "旧课程" }] },
+    { resources: [{ id: "REAL-RESOURCE", title: "旧教案" }] },
+  ];
+  for (const records of legacyWithUnreadableRecords) {
+    assert.throws(
+      () => migrateWorkbenchData({ schemaVersion: 0, ...records }, now),
+      /INVALID_LEGACY_DATA/,
+      "a successful restore must never silently discard unreadable source records",
+    );
+  }
 });

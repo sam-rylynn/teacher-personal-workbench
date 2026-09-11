@@ -194,6 +194,8 @@ export interface WorkbenchDataV1 {
     createdAt: string;
     updatedAt: string;
     containsDemoData: boolean;
+    /** Records the one-time refresh of untouched fictional preview copy. */
+    demoCopyVersion?: 1;
   };
   user: UserConfiguration;
   students: StudentRecord[];
@@ -300,7 +302,7 @@ export type DeviceLocalSaveResult =
   | {
       ok: false;
       storageKey: string;
-      reason: "storage-unavailable" | "read-only" | "storage-error";
+      reason: "storage-unavailable" | "read-only" | "storage-error" | "invalid-data" | "invalid-stored-data";
       message: string;
     };
 
@@ -322,11 +324,11 @@ export const MOBILE_READ_ONLY_ACCESS: WorkbenchWriteContext = {
 
 export const COMMUNICATION_DIFFICULTY_LABELS = [
   "未设置",
-  "畅通",
-  "可沟通",
-  "需解释",
-  "需多次跟进",
-  "暂难推进",
+  "沟通顺畅",
+  "基本顺畅",
+  "需要解释",
+  "需要多次跟进",
+  "暂时难推进",
 ] as const;
 
 export const SUPPORT_WILLINGNESS_LABELS = [
@@ -335,7 +337,7 @@ export const SUPPORT_WILLINGNESS_LABELS = [
   "偶有行动",
   "提醒后配合",
   "稳定配合",
-  "主动共促",
+  "主动配合",
 ] as const;
 
 const SEED_CREATED_AT = "2026-09-16T07:30:00+08:00";
@@ -404,18 +406,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08403", [79, 81, 82, 85], [19, 17, 14, 10], 43, 79), ...createSubjectAssessments("S08403", "数学", [[85, 12], [88, 9]], 43, 80), ...createSubjectAssessments("S08403", "英语", [[72, 25], [74, 22]], 43, 76)],
       recentIssue: {
         id: "I08403",
-        title: "文本依据仍不充分",
-        detail: "解释动作描写的情感作用时，答案缺少对应原句。",
+        title: "回答时没有引用原文",
+        detail: "说到人物情感时，常直接写结论，没有先找出原文中的对应句子。",
         observedOn: "2026-09-15",
         status: "观察中",
-        nextAction: "课堂比较任务中再次核对是否能先标原句再作答。",
+        nextAction: "下次讲评时，让他先画出原句，再说这句话表现了什么情感。",
         followUpOn: "2026-09-17",
       },
       homeSchool: {
         communicationDifficulty: 2,
-        communicationNote: "最近2次沟通均在次日之前完成确认。",
+        communicationNote: "最近两次消息都在第二天前收到回复。",
         supportWillingness: 5,
-        supportNote: "愿意配合使用同类文本做一次对照练习。",
+        supportNote: "愿意陪孩子找一篇相似文章再练一次。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -428,18 +430,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08412", [78, 82, 83, 81], [22, 17, 15, 19], 43, 79), ...createSubjectAssessments("S08412", "数学", [[80, 18], [78, 21]], 43, 80), ...createSubjectAssessments("S08412", "英语", [[83, 14], [85, 12]], 43, 76)],
       recentIssue: {
         id: "I08412",
-        title: "补学清单还剩1项",
-        detail: "请假课次的阅读题尚未完成核对。",
+        title: "请假后的阅读题还没补完",
+        detail: "请假期间落下的阅读题还有一道没有完成。",
         observedOn: "2026-09-16",
         status: "待处理",
-        nextAction: "完成阅读题后，由老师核对关键步骤。",
+        nextAction: "完成后重点看一下答题思路是否写完整。",
         followUpOn: "2026-09-17",
       },
       homeSchool: {
         communicationDifficulty: 1,
-        communicationNote: "请假与补学安排一次沟通即确认。",
+        communicationNote: "请假和补课安排一次就说清楚了。",
         supportWillingness: 4,
-        supportNote: "已按清单提醒并协助确认其中2项。",
+        supportNote: "已经按清单提醒，三项中完成了两项。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -452,18 +454,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08207", [78, 81, 84, 87], [21, 17, 12, 9], 44, 80), ...createSubjectAssessments("S08207", "数学", [[84, 13], [87, 8]], 44, 81), ...createSubjectAssessments("S08207", "英语", [[79, 20], [81, 17]], 44, 77)],
       recentIssue: {
         id: "I08207",
-        title: "修改理由尚未写明",
-        detail: "修改课堂回答后，没有说明两版答案的差异。",
+        title: "改答案时没写理由",
+        detail: "改完课堂回答后，没有说明为什么要这样改。",
         observedOn: "2026-09-15",
         status: "观察中",
-        nextAction: "课堂复盘两版答案并补写一句修改理由。",
+        nextAction: "下次课上让他对照两版答案，补写一句修改理由。",
         followUpOn: "2026-09-17",
       },
       homeSchool: {
         communicationDifficulty: 2,
-        communicationNote: "最近3次消息均在24小时内收到回复。",
+        communicationNote: "最近三次消息都在一天内收到回复。",
         supportWillingness: 4,
-        supportNote: "已确认课后5分钟比较两版答案的安排。",
+        supportNote: "愿意每天留5分钟，让孩子比较两版答案。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -476,18 +478,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08219", [86, 88, 90, 92], [8, 6, 4, 3], 44, 80), ...createSubjectAssessments("S08219", "数学", [[90, 5], [93, 2]], 44, 81), ...createSubjectAssessments("S08219", "英语", [[88, 7], [90, 5]], 44, 77)],
       recentIssue: {
         id: "I08219",
-        title: "写作第二稿尚未提交",
-        detail: "叙事写作第一稿已反馈，第二稿还未收到。",
+        title: "作文第二稿还没交",
+        detail: "第一稿已经讲评，修改后的第二稿还没有提交。",
         observedOn: "2026-09-16",
         status: "待处理",
-        nextAction: "按3项修改清单完成第二稿。",
+        nextAction: "按三条修改建议完成第二稿并提交。",
         followUpOn: "2026-09-17",
       },
       homeSchool: {
         communicationDifficulty: 1,
-        communicationNote: "最近一次写作反馈在当日完成确认。",
+        communicationNote: "作文反馈当天就得到回复。",
         supportWillingness: 4,
-        supportNote: "已协助确认第二稿提交日期。",
+        supportNote: "已经确认第二稿的提交时间。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -500,18 +502,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08231", [80, 78, 74, 69], [21, 23, 26, 30], 44, 80), ...createSubjectAssessments("S08231", "数学", [[74, 24], [71, 27]], 44, 81), ...createSubjectAssessments("S08231", "英语", [[77, 22], [75, 24]], 44, 77)],
       recentIssue: {
         id: "I08231",
-        title: "阅读问题单尚未补写",
-        detail: "阅读问题单第3题目前为空。",
+        title: "阅读单第3题还空着",
+        detail: "阅读问题单第3题还没有补写。",
         observedOn: "2026-09-16",
         status: "待处理",
-        nextAction: "下节课开始前核对补写结果。",
+        nextAction: "下节课前看一下是否已经补完。",
         followUpOn: "2026-09-17",
       },
       homeSchool: {
         communicationDifficulty: 3,
-        communicationNote: "最近一次沟通经1次提醒后完成确认。",
+        communicationNote: "上次沟通提醒一次后收到回复。",
         supportWillingness: 3,
-        supportNote: "已知晓补写安排，当前尚未确认完成。",
+        supportNote: "知道需要补写，但还没确认是否完成。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -524,18 +526,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08427", [83, 85, 87, 89], [13, 10, 7, 5], 43, 79), ...createSubjectAssessments("S08427", "数学", [[86, 10], [89, 6]], 43, 80), ...createSubjectAssessments("S08427", "英语", [[84, 13], [86, 11]], 43, 76)],
       recentIssue: {
         id: "I08427",
-        title: "朗读停顿位置需复核",
-        detail: "录音中有两处停顿与标点位置不一致。",
+        title: "朗读停顿还不准确",
+        detail: "朗读录音里有两处没有按标点停顿。",
         observedOn: "2026-09-15",
         status: "观察中",
-        nextAction: "第二版录音提交后复核对应时间点。",
+        nextAction: "收到第二版录音后，重点听这两处是否改好。",
         followUpOn: "2026-09-18",
       },
       homeSchool: {
         communicationDifficulty: 2,
-        communicationNote: "朗读反馈在当日晚间完成确认。",
+        communicationNote: "朗读反馈当晚得到回复。",
         supportWillingness: 3,
-        supportNote: "已提醒查看两处时间标记，第二版待上传。",
+        supportNote: "已经提醒孩子留意两处停顿，第二版还没提交。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -548,18 +550,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08605", [84, 86, 88, 91], [12, 10, 7, 4], 42, 78), ...createSubjectAssessments("S08605", "数学", [[88, 8], [91, 4]], 42, 79), ...createSubjectAssessments("S08605", "英语", [[82, 16], [84, 14]], 42, 75)],
       recentIssue: {
         id: "I08605",
-        title: "材料来源尚未补全",
-        detail: "论据卡中的两项材料没有注明书名或文章名。",
+        title: "两条材料没写出处",
+        detail: "论据卡里有两条材料没有注明书名或文章名。",
         observedOn: "2026-09-16",
         status: "待处理",
-        nextAction: "核对并补充两项材料来源。",
+        nextAction: "补上这两条材料的出处。",
         followUpOn: "2026-09-18",
       },
       homeSchool: {
         communicationDifficulty: 4,
-        communicationNote: "家庭联系时段与学校窗口不重合，通常需预约晚间沟通。",
+        communicationNote: "家长方便联系的时间和学校工作时间错开，需要约在晚上。",
         supportWillingness: 3,
-        supportNote: "已确认补充来源要求，尚未反馈完成情况。",
+        supportNote: "已经知道要补出处，还没反馈是否完成。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -572,18 +574,18 @@ function createSeedStudents(): StudentRecord[] {
       assessments: [...createSeedAssessments("S08616", [71, 73, 75, 78], [34, 31, 28, 24], 42, 78), ...createSubjectAssessments("S08616", "数学", [[68, 33], [71, 30]], 42, 79), ...createSubjectAssessments("S08616", "英语", [[70, 31], [88, 28, 120]], 42, 75)],
       recentIssue: {
         id: "I08616",
-        title: "论据与观点关系不直接",
-        detail: "写作提纲中的一个事例无法直接支撑中心观点。",
+        title: "举的例子不能说明观点",
+        detail: "写作提纲里有一个事例不能直接说明中心观点。",
         observedOn: "2026-09-15",
         status: "观察中",
-        nextAction: "替换论据后核对与观点的对应关系。",
+        nextAction: "换一个更合适的事例，再看是否能说明中心观点。",
         followUpOn: "2026-09-17",
       },
       homeSchool: {
         communicationDifficulty: 2,
-        communicationNote: "最近一次写作反馈在24小时内确认。",
+        communicationNote: "上次作文反馈一天内得到回复。",
         supportWillingness: 5,
-        supportNote: "愿意共同核对替换论据的完成情况。",
+        supportNote: "愿意一起提醒孩子完成事例替换。",
         updatedAt: SEED_UPDATED_AT,
       },
     },
@@ -660,7 +662,7 @@ function createSeedTasks(): WorkbenchTask[] {
     {
       id: "T001",
       category: "教学",
-      title: "完成八4班会岗位表最后核对",
+      title: "确认八年级4班班会岗位表",
       dueAt: "2026-09-16T15:20:00+08:00",
       estimatedMinutes: 20,
       status: "进行中",
@@ -670,7 +672,7 @@ function createSeedTasks(): WorkbenchTask[] {
     {
       id: "T002",
       category: "教学",
-      title: "批改八2阅读问题单并记录共性问题",
+      title: "批改八年级2班阅读问题单并记录共性问题",
       dueAt: "2026-09-17T17:00:00+08:00",
       estimatedMinutes: 50,
       status: "进行中",
@@ -680,7 +682,7 @@ function createSeedTasks(): WorkbenchTask[] {
     {
       id: "T003",
       category: "行政",
-      title: "汇总八4运动会报名及志愿岗位",
+      title: "汇总八年级4班运动会报名及志愿岗位",
       dueAt: "2026-09-17T16:00:00+08:00",
       estimatedMinutes: 20,
       status: "待开始",
@@ -690,7 +692,7 @@ function createSeedTasks(): WorkbenchTask[] {
     {
       id: "T004",
       category: "学生",
-      title: "核对赵清禾补学清单剩余阅读题",
+      title: "查看赵清禾补写的阅读题",
       dueAt: "2026-09-17T12:00:00+08:00",
       estimatedMinutes: 10,
       status: "待开始",
@@ -1081,6 +1083,7 @@ function isWorkbenchDataV1(value: unknown): value is WorkbenchDataV1 {
     isFiniteNumber(value.meta.revision) && Number.isInteger(value.meta.revision) && value.meta.revision >= 1 &&
     typeof value.meta.createdAt === "string" && typeof value.meta.updatedAt === "string" &&
     typeof value.meta.containsDemoData === "boolean" &&
+    (value.meta.demoCopyVersion === undefined || value.meta.demoCopyVersion === 1) &&
     isUserConfigurationShape(value.user) &&
     value.students.every(isStudentRecordShape) && value.lessons.every(isLessonSessionShape) &&
     value.tasks.every(isTaskShape) && value.resources.every(isResourceShape) &&
@@ -1114,6 +1117,109 @@ function toFiniteNumber(value: unknown, fallback: number): number {
 
 function toStringValue(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+/**
+ * Copy-only refresh for untouched fictional records saved by the v0.5.0
+ * preview. Exact matching keeps teacher-written content unchanged while making
+ * the revised teacher-facing language visible after an ordinary page refresh.
+ */
+type LegacyDemoStudentCopy = {
+  issueTitle: readonly [string, string];
+  issueDetail: readonly [string, string];
+  issueNextAction: readonly [string, string];
+  communicationNote: readonly [string, string];
+  supportNote: readonly [string, string];
+};
+
+const LEGACY_DEMO_STUDENT_COPY: Record<string, LegacyDemoStudentCopy> = {
+  S08403: {
+    issueTitle: ["文本依据仍不充分", "回答时没有引用原文"],
+    issueDetail: ["解释动作描写的情感作用时，答案缺少对应原句。", "说到人物情感时，常直接写结论，没有先找出原文中的对应句子。"],
+    issueNextAction: ["课堂比较任务中再次核对是否能先标原句再作答。", "下次讲评时，让他先画出原句，再说这句话表现了什么情感。"],
+    communicationNote: ["最近2次沟通均在次日之前完成确认。", "最近两次消息都在第二天前收到回复。"],
+    supportNote: ["愿意配合使用同类文本做一次对照练习。", "愿意陪孩子找一篇相似文章再练一次。"],
+  },
+  S08412: {
+    issueTitle: ["补学清单还剩1项", "请假后的阅读题还没补完"],
+    issueDetail: ["请假课次的阅读题尚未完成核对。", "请假期间落下的阅读题还有一道没有完成。"],
+    issueNextAction: ["完成阅读题后，由老师核对关键步骤。", "完成后重点看一下答题思路是否写完整。"],
+    communicationNote: ["请假与补学安排一次沟通即确认。", "请假和补课安排一次就说清楚了。"],
+    supportNote: ["已按清单提醒并协助确认其中2项。", "已经按清单提醒，三项中完成了两项。"],
+  },
+  S08207: {
+    issueTitle: ["修改理由尚未写明", "改答案时没写理由"],
+    issueDetail: ["修改课堂回答后，没有说明两版答案的差异。", "改完课堂回答后，没有说明为什么要这样改。"],
+    issueNextAction: ["课堂复盘两版答案并补写一句修改理由。", "下次课上让他对照两版答案，补写一句修改理由。"],
+    communicationNote: ["最近3次消息均在24小时内收到回复。", "最近三次消息都在一天内收到回复。"],
+    supportNote: ["已确认课后5分钟比较两版答案的安排。", "愿意每天留5分钟，让孩子比较两版答案。"],
+  },
+  S08219: {
+    issueTitle: ["写作第二稿尚未提交", "作文第二稿还没交"],
+    issueDetail: ["叙事写作第一稿已反馈，第二稿还未收到。", "第一稿已经讲评，修改后的第二稿还没有提交。"],
+    issueNextAction: ["按3项修改清单完成第二稿。", "按三条修改建议完成第二稿并提交。"],
+    communicationNote: ["最近一次写作反馈在当日完成确认。", "作文反馈当天就得到回复。"],
+    supportNote: ["已协助确认第二稿提交日期。", "已经确认第二稿的提交时间。"],
+  },
+  S08231: {
+    issueTitle: ["阅读问题单尚未补写", "阅读单第3题还空着"],
+    issueDetail: ["阅读问题单第3题目前为空。", "阅读问题单第3题还没有补写。"],
+    issueNextAction: ["下节课开始前核对补写结果。", "下节课前看一下是否已经补完。"],
+    communicationNote: ["最近一次沟通经1次提醒后完成确认。", "上次沟通提醒一次后收到回复。"],
+    supportNote: ["已知晓补写安排，当前尚未确认完成。", "知道需要补写，但还没确认是否完成。"],
+  },
+  S08427: {
+    issueTitle: ["朗读停顿位置需复核", "朗读停顿还不准确"],
+    issueDetail: ["录音中有两处停顿与标点位置不一致。", "朗读录音里有两处没有按标点停顿。"],
+    issueNextAction: ["第二版录音提交后复核对应时间点。", "收到第二版录音后，重点听这两处是否改好。"],
+    communicationNote: ["朗读反馈在当日晚间完成确认。", "朗读反馈当晚得到回复。"],
+    supportNote: ["已提醒查看两处时间标记，第二版待上传。", "已经提醒孩子留意两处停顿，第二版还没提交。"],
+  },
+  S08605: {
+    issueTitle: ["材料来源尚未补全", "两条材料没写出处"],
+    issueDetail: ["论据卡中的两项材料没有注明书名或文章名。", "论据卡里有两条材料没有注明书名或文章名。"],
+    issueNextAction: ["核对并补充两项材料来源。", "补上这两条材料的出处。"],
+    communicationNote: ["家庭联系时段与学校窗口不重合，通常需预约晚间沟通。", "家长方便联系的时间和学校工作时间错开，需要约在晚上。"],
+    supportNote: ["已确认补充来源要求，尚未反馈完成情况。", "已经知道要补出处，还没反馈是否完成。"],
+  },
+  S08616: {
+    issueTitle: ["论据与观点关系不直接", "举的例子不能说明观点"],
+    issueDetail: ["写作提纲中的一个事例无法直接支撑中心观点。", "写作提纲里有一个事例不能直接说明中心观点。"],
+    issueNextAction: ["替换论据后核对与观点的对应关系。", "换一个更合适的事例，再看是否能说明中心观点。"],
+    communicationNote: ["最近一次写作反馈在24小时内确认。", "上次作文反馈一天内得到回复。"],
+    supportNote: ["愿意共同核对替换论据的完成情况。", "愿意一起提醒孩子完成事例替换。"],
+  },
+};
+
+const LEGACY_DEMO_TASK_COPY: Record<string, readonly [string, string]> = {
+  T001: ["完成八4班会岗位表最后核对", "确认八年级4班班会岗位表"],
+  T002: ["批改八2阅读问题单并记录共性问题", "批改八年级2班阅读问题单并记录共性问题"],
+  T003: ["汇总八4运动会报名及志愿岗位", "汇总八年级4班运动会报名及志愿岗位"],
+  T004: ["核对赵清禾补学清单剩余阅读题", "查看赵清禾补写的阅读题"],
+};
+
+function refreshLegacyDemoCopy(data: WorkbenchDataV1): void {
+  if (!data.meta.containsDemoData || data.meta.demoCopyVersion === 1) return;
+  const originalStudents = createSeedStudents();
+  for (const student of data.students) {
+    if (!Object.hasOwn(LEGACY_DEMO_STUDENT_COPY, student.id)) continue;
+    const copy = LEGACY_DEMO_STUDENT_COPY[student.id];
+    const original = originalStudents.find((candidate) => candidate.id === student.id);
+    if (!original || original.name !== student.name || original.className !== student.className) continue;
+    if (student.recentIssue?.id === original.recentIssue?.id && student.recentIssue) {
+      if (student.recentIssue.title === copy.issueTitle[0]) student.recentIssue.title = copy.issueTitle[1];
+      if (student.recentIssue.detail === copy.issueDetail[0]) student.recentIssue.detail = copy.issueDetail[1];
+      if (student.recentIssue.nextAction === copy.issueNextAction[0]) student.recentIssue.nextAction = copy.issueNextAction[1];
+    }
+    if (student.homeSchool.communicationNote === copy.communicationNote[0]) student.homeSchool.communicationNote = copy.communicationNote[1];
+    if (student.homeSchool.supportNote === copy.supportNote[0]) student.homeSchool.supportNote = copy.supportNote[1];
+  }
+  for (const task of data.tasks) {
+    if (!Object.hasOwn(LEGACY_DEMO_TASK_COPY, task.id)) continue;
+    const copy = LEGACY_DEMO_TASK_COPY[task.id];
+    if (copy && task.title === copy[0]) task.title = copy[1];
+  }
+  data.meta.demoCopyVersion = 1;
 }
 
 function normalizeStoredV1(data: WorkbenchDataV1): WorkbenchDataV1 {
@@ -1177,8 +1283,8 @@ function legacyAssessment(
   if (!Number.isFinite(score) || maxScore <= 0 || score < 0 || score > maxScore) return null;
   return {
     id: toStringValue(value.id, `${studentId}-A-MIGRATED-${index + 1}`),
-    title: toStringValue(value.title ?? value.assessmentTitle, `迁移成绩 ${index + 1}`),
-    subject: toStringValue(value.subject, "未标注学科"),
+    title: toStringValue(value.title ?? value.assessmentTitle, `旧数据成绩 ${index + 1}`),
+    subject: toStringValue(value.subject, "学科待补充"),
     occurredOn: toStringValue(value.occurredOn ?? value.date, fallbackDate),
     maxScore,
     score,
@@ -1197,6 +1303,11 @@ function legacyAssessment(
  * fictional seed records can never be injected into a teacher's restore.
  */
 function migrateLegacyV0(value: Record<string, unknown>, now: string): WorkbenchDataV1 {
+  for (const collection of ["students", "tasks", "lessons", "resources"]) {
+    if (value[collection] !== undefined && !Array.isArray(value[collection])) {
+      throw new Error("INVALID_LEGACY_DATA: 旧数据中有无法读取的记录列表，未恢复任何记录。");
+    }
+  }
   const seedUser = createSeedWorkbenchData({ includeMobileSnapshot: false }).user;
   const migrated = createEmptyWorkbenchData(seedUser, now);
   const legacyUser = isRecord(value.user) ? value.user : isRecord(value.profile) ? value.profile : null;
@@ -1221,22 +1332,26 @@ function migrateLegacyV0(value: Record<string, unknown>, now: string): Workbench
 
   if (Array.isArray(value.students)) {
     for (const [index, rawStudent] of value.students.entries()) {
-      if (!isRecord(rawStudent)) continue;
+      if (!isRecord(rawStudent)) throw new Error("INVALID_LEGACY_DATA: 旧数据中有无法读取的学生，未恢复任何记录。");
       const name = toStringValue(rawStudent.name, "");
       const className = toStringValue(rawStudent.className, "");
-      if (!name || !className) continue;
+      if (!name || !className) throw new Error("INVALID_LEGACY_DATA: 旧数据中的学生缺少姓名或班级，未恢复任何记录。");
       const id = toStringValue(rawStudent.id, `S-MIGRATED-${index + 1}`);
       const fallbackDate = getDeviceLocalDate(now, migrated.user.timeZone);
+      if (rawStudent.assessments !== undefined && !Array.isArray(rawStudent.assessments)) {
+        throw new Error("INVALID_LEGACY_DATA: 旧数据中有无法读取的成绩列表，未恢复任何记录。");
+      }
       const assessments = Array.isArray(rawStudent.assessments)
-        ? rawStudent.assessments.flatMap((assessment, assessmentIndex) => {
+        ? rawStudent.assessments.map((assessment, assessmentIndex) => {
             const parsed = legacyAssessment(assessment, id, assessmentIndex, fallbackDate);
-            return parsed ? [parsed] : [];
+            if (!parsed) throw new Error("INVALID_LEGACY_DATA: 旧数据中有无法读取的成绩，未恢复任何记录。");
+            return parsed;
           })
         : [];
       if (assessments.length === 0 && (isFiniteNumber(rawStudent.score) || isFiniteNumber(rawStudent.previousScore))) {
         if (isFiniteNumber(rawStudent.previousScore)) {
           const previous = legacyAssessment({
-            title: rawStudent.previousTitle ?? "迁移前次成绩",
+            title: rawStudent.previousTitle ?? "旧数据里的前一次成绩",
             subject: rawStudent.subject,
             occurredOn: rawStudent.previousOccurredOn ?? addDaysLocal(fallbackDate, -1),
             maxScore: rawStudent.maxScore,
@@ -1249,7 +1364,7 @@ function migrateLegacyV0(value: Record<string, unknown>, now: string): Workbench
         }
         if (isFiniteNumber(rawStudent.score)) {
           const latest = legacyAssessment({
-            title: rawStudent.title ?? rawStudent.assessmentTitle ?? "迁移当前成绩",
+            title: rawStudent.title ?? rawStudent.assessmentTitle ?? "旧数据里的最近一次成绩",
             subject: rawStudent.subject,
             occurredOn: rawStudent.occurredOn ?? fallbackDate,
             maxScore: rawStudent.maxScore,
@@ -1273,11 +1388,11 @@ function migrateLegacyV0(value: Record<string, unknown>, now: string): Workbench
         recentIssue: issueText
           ? {
               id: toStringValue(rawStudent.issueId, `${id}-I-MIGRATED`),
-              title: toStringValue(rawStudent.issueTitle, "迁移的近期问题"),
+              title: toStringValue(rawStudent.issueTitle, "旧数据里的近期问题"),
               detail: issueText,
               observedOn: toStringValue(rawStudent.observedOn, fallbackDate),
               status: isStudentIssueStatus(rawStudent.issueStatus) ? rawStudent.issueStatus : "观察中",
-              nextAction: toStringValue(rawStudent.issueNext, "请老师核对并补充下一步。"),
+              nextAction: toStringValue(rawStudent.issueNext, "请老师补充准备怎么跟进。"),
             }
           : null,
         homeSchool: {
@@ -1294,9 +1409,9 @@ function migrateLegacyV0(value: Record<string, unknown>, now: string): Workbench
   if (Array.isArray(value.tasks)) {
     const migratedTasks: WorkbenchTask[] = [];
     for (const rawTask of value.tasks) {
-      if (!isRecord(rawTask)) continue;
+      if (!isRecord(rawTask)) throw new Error("INVALID_LEGACY_DATA: 旧数据中有无法读取的事项，未恢复任何记录。");
       const title = toStringValue(rawTask.title, "");
-      if (!title) continue;
+      if (!title) throw new Error("INVALID_LEGACY_DATA: 旧数据中的事项缺少标题，未恢复任何记录。");
       const rawDuration = rawTask.estimatedMinutes ?? rawTask.duration;
       const minutes =
         typeof rawDuration === "string"
@@ -1319,10 +1434,16 @@ function migrateLegacyV0(value: Record<string, unknown>, now: string): Workbench
   }
 
   if (Array.isArray(value.lessons)) {
-    migrated.lessons = value.lessons.flatMap((lesson) => isLessonSessionShape(lesson) ? [cloneSerializable(lesson)] : []);
+    migrated.lessons = value.lessons.map((lesson) => {
+      if (!isLessonSessionShape(lesson)) throw new Error("INVALID_LEGACY_DATA: 旧数据中有无法读取的课程，未恢复任何记录。");
+      return cloneSerializable(lesson);
+    });
   }
   if (Array.isArray(value.resources)) {
-    migrated.resources = value.resources.flatMap((resource) => isResourceShape(resource) ? [cloneSerializable(resource)] : []);
+    migrated.resources = value.resources.map((resource) => {
+      if (!isResourceShape(resource)) throw new Error("INVALID_LEGACY_DATA: 旧数据中有无法读取的教学资料，未恢复任何记录。");
+      return cloneSerializable(resource);
+    });
   }
   const legacyMeta = isRecord(value.meta) ? value.meta : null;
   migrated.meta.containsDemoData = legacyMeta?.containsDemoData === true;
@@ -1392,6 +1513,7 @@ export function createSeedWorkbenchData(options: { includeMobileSnapshot?: boole
       createdAt: SEED_CREATED_AT,
       updatedAt: SEED_UPDATED_AT,
       containsDemoData: true,
+      demoCopyVersion: 1,
     },
     user: {
       workbenchName: "林老师的工作台",
@@ -1455,10 +1577,10 @@ export function getAssessmentChange(
     subject,
     latest,
     previous,
-    scoreDelta: latest.maxScore === previous.maxScore ? latest.score - previous.score : null,
+    scoreDelta: latest.maxScore === previous.maxScore ? roundTo(latest.score - previous.score, 10) : null,
     scoreRateDelta:
       latestRate === null || previousRate === null ? null : roundTo(latestRate - previousRate, 1),
-    rankDelta: previous.rank - latest.rank,
+    rankDelta: latest.cohortSize === previous.cohortSize ? previous.rank - latest.rank : null,
   };
 }
 
@@ -1633,9 +1755,18 @@ export function summarizeWorkbench(
 export function createMobileReadOnlySnapshot(
   data: WorkbenchData,
   generatedAt: string,
-  options: { localDate?: string; priorityLimit?: number; lessonLimit?: number; taskLimit?: number } = {},
+  options: {
+    localDate?: string;
+    /** Demo reference time; generatedAt always retains the actual export time. */
+    referenceNow?: string;
+    priorityLimit?: number;
+    lessonLimit?: number;
+    taskLimit?: number;
+  } = {},
 ): MobileReadOnlySnapshot {
-  const localDate = options.localDate ?? generatedAt.slice(0, 10);
+  const referenceNow = options.referenceNow ?? generatedAt;
+  const referenceMs = new Date(referenceNow).getTime();
+  const localDate = options.localDate ?? getDeviceLocalDate(referenceNow, data.user.timeZone);
   const priorityLimit = options.priorityLimit ?? 5;
   const lessonLimit = options.lessonLimit ?? 5;
   const taskLimit = options.taskLimit ?? 8;
@@ -1666,14 +1797,14 @@ export function createMobileReadOnlySnapshot(
     accent: data.user.appearance.accent,
     summary: summarizeWorkbench(data, localDate),
     priorityStudents,
-    upcomingLessons: expandLessonsForRange(data, localDate, addDaysLocal(localDate, 14), generatedAt)
-      .filter((lesson) => lesson.status === "待上课" && lesson.startsAt >= generatedAt)
+    upcomingLessons: expandLessonsForRange(data, localDate, addDaysLocal(localDate, 14), referenceNow)
+      .filter((lesson) => lesson.status === "待上课" && new Date(lesson.startsAt).getTime() >= referenceMs)
       .slice(0, lessonLimit)
       .map(cloneSerializable),
     openTasks: data.tasks
       .filter((task) => task.status !== "已完成")
       .slice()
-      .sort((left, right) => left.dueAt.localeCompare(right.dueAt))
+      .sort((left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime())
       .slice(0, taskLimit)
       .map(cloneSerializable),
   };
@@ -1733,8 +1864,10 @@ export function migrateWorkbenchData(
 ): Omit<WorkbenchHydrationResult, "source"> & { source: "stored" | "migrated" } {
   const unpacked = unpackStoredData(input);
   if (isWorkbenchDataV1(unpacked)) {
+    const data = normalizeStoredV1(unpacked);
+    refreshLegacyDemoCopy(data);
     return {
-      data: normalizeStoredV1(unpacked),
+      data,
       source: "stored",
       migratedFrom: null,
       warnings: [],
@@ -1748,11 +1881,13 @@ export function migrateWorkbenchData(
       if (!isWorkbenchDataV1(migrated)) {
         throw new Error("INVALID_LEGACY_DATA: 早期数据中存在无效或重复的记录，未覆盖当前工作区。");
       }
+      const data = normalizeStoredV1(migrated);
+      refreshLegacyDemoCopy(data);
       return {
-        data: normalizeStoredV1(migrated),
+        data,
         source: "migrated",
         migratedFrom: 0,
-        warnings: ["已将早期本地数据转换为当前版本，请核对成绩日期和事项截止时间。"],
+        warnings: ["已恢复旧版工作台数据，请检查成绩日期和事项截止时间。"],
       };
     }
     if (version === 0) {
@@ -1778,16 +1913,12 @@ export function deserializeWorkbenchData(
   try {
     const parsed = JSON.parse(serialized) as unknown;
     return migrateWorkbenchData(parsed, now);
-  } catch (error) {
+  } catch {
     return {
       data: createSeedWorkbenchData(),
       source: "seed",
       migratedFrom: null,
-      warnings: [
-        error instanceof Error
-          ? `本地数据未能读取，已载入演示数据：${error.message}`
-          : "本地数据未能读取，已载入演示数据。",
-      ],
+      warnings: ["本机数据暂时无法读取，已打开演示内容；原数据没有被覆盖。"],
     };
   }
 }
@@ -1803,7 +1934,7 @@ export function loadDeviceLocalWorkbench(options: {
       data: createSeedWorkbenchData(),
       source: "seed",
       migratedFrom: null,
-      warnings: ["当前环境无法读取此设备上的数据，已载入演示数据。"],
+      warnings: ["这台设备暂时无法读取工作台数据，已打开演示内容。"],
       storageAvailable: false,
       storageKey: WORKBENCH_STORAGE_KEY,
     };
@@ -1827,7 +1958,7 @@ export function loadDeviceLocalWorkbench(options: {
         ...result,
         source: result.source === "stored" ? "migrated" : result.source,
         migratedFrom: result.migratedFrom ?? 0,
-        warnings: [...result.warnings, "检测到早期本地数据，保存后将使用当前版本。"],
+        warnings: [...result.warnings, "这是旧版工作台数据，确认保存后会自动整理为新版格式。"],
         storageAvailable: true,
         storageKey: WORKBENCH_STORAGE_KEY,
       };
@@ -1841,16 +1972,12 @@ export function loadDeviceLocalWorkbench(options: {
       storageAvailable: true,
       storageKey: WORKBENCH_STORAGE_KEY,
     };
-  } catch (error) {
+  } catch {
     return {
       data: createSeedWorkbenchData(),
       source: "seed",
       migratedFrom: null,
-      warnings: [
-        error instanceof Error
-          ? `此设备上的数据暂时无法读取：${error.message}`
-          : "此设备上的数据暂时无法读取。",
-      ],
+      warnings: ["本机数据暂时无法读取，已打开演示内容；原数据没有被覆盖。"],
       storageAvailable: true,
       storageKey: WORKBENCH_STORAGE_KEY,
     };
@@ -1911,6 +2038,8 @@ export function saveDeviceLocalWorkbench(
     savedAt?: string;
     /** In-memory state before this save, used to create the very first backup. */
     previousDataForBackup?: WorkbenchData;
+    /** Set only after the teacher explicitly confirms a restore or reset. */
+    allowReplaceInvalidStoredData?: boolean;
   },
 ): DeviceLocalSaveResult {
   const guard = checkWorkbenchWriteAccess(options.access);
@@ -1929,21 +2058,40 @@ export function saveDeviceLocalWorkbench(
       ok: false,
       storageKey: WORKBENCH_STORAGE_KEY,
       reason: "storage-unavailable",
-      message: "当前环境无法保存到此设备。",
+      message: "这台设备暂时无法保存，请检查浏览器是否允许保存数据。",
     };
   }
 
-  const savedAt = options.savedAt ?? data.meta.updatedAt;
-  const envelope: StoredWorkbenchEnvelopeV1 = {
-    schemaVersion: WORKBENCH_SCHEMA_VERSION,
-    storageKind: WORKBENCH_STORAGE_KIND,
-    savedAt,
-    data: normalizeStoredV1(data),
-  };
-
   try {
+    if (!isWorkbenchDataV1(data)) {
+      return {
+        ok: false,
+        storageKey: WORKBENCH_STORAGE_KEY,
+        reason: "invalid-data",
+        message: "本次内容不完整，未保存；原内容没有改变。",
+      };
+    }
+    const savedAt = options.savedAt ?? data.meta.updatedAt;
+    const envelope: StoredWorkbenchEnvelopeV1 = {
+      schemaVersion: WORKBENCH_SCHEMA_VERSION,
+      storageKind: WORKBENCH_STORAGE_KIND,
+      savedAt,
+      data: normalizeStoredV1(data),
+    };
     // Keep the previous version recoverable before overwriting it.
     const storedBeforeSave = storage.getItem(WORKBENCH_STORAGE_KEY);
+    if (storedBeforeSave !== null && !options.allowReplaceInvalidStoredData) {
+      try {
+        migrateWorkbenchData(JSON.parse(storedBeforeSave), savedAt);
+      } catch {
+        return {
+          ok: false,
+          storageKey: WORKBENCH_STORAGE_KEY,
+          reason: "invalid-stored-data",
+          message: "原有内容暂时无法读取，已暂停保存以保留原内容。请在“数据与备份”中恢复备份后继续。",
+        };
+      }
+    }
     const previousEnvelope = !storedBeforeSave && options.previousDataForBackup
       ? JSON.stringify({
           schemaVersion: WORKBENCH_SCHEMA_VERSION,
@@ -1955,13 +2103,12 @@ export function saveDeviceLocalWorkbench(
     rotateDeviceLocalBackup(storage, storedBeforeSave ?? previousEnvelope, savedAt);
     storage.setItem(WORKBENCH_STORAGE_KEY, JSON.stringify(envelope));
     return { ok: true, storageKey: WORKBENCH_STORAGE_KEY, savedAt };
-  } catch (error) {
+  } catch {
     return {
       ok: false,
       storageKey: WORKBENCH_STORAGE_KEY,
       reason: "storage-error",
-      message:
-        error instanceof Error ? `保存失败：${error.message}` : "保存失败，请检查此设备的可用空间。",
+      message: "本次保存失败，请检查设备可用空间后重试。",
     };
   }
 }
@@ -2097,10 +2244,10 @@ export function analyzeStudentSignals(student: StudentRecord): StudentSignal[] {
           tone: "green",
           rule: "improve-streak",
           ...base,
-          title: `${student.name} ${scope}近两次持续上涨`,
+          title: `${student.name} ${scope}近两次都有进步`,
           detail: weak && weak.subject !== subject
-            ? `两次累计 +${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点;${weak.subject} 相对较弱,仍有提升空间。`
-            : `两次累计 +${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点,保持关注。`,
+            ? `两次合计提高 ${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点；${weak.subject}目前相对较弱，可以继续关注。`
+            : `两次合计提高 ${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点，可以继续保持。`,
         });
       }
       if (lastDelta < 0 && prevDelta < 0) {
@@ -2109,8 +2256,8 @@ export function analyzeStudentSignals(student: StudentRecord): StudentSignal[] {
           tone: "red",
           rule: "decline-streak",
           ...base,
-          title: `${student.name} ${scope}近两次连续下降`,
-          detail: `两次累计 ${roundTo(rates.at(-1)! - rates.at(-3)!, 1)} 个百分点,建议关注原因。`,
+          title: `${student.name} ${scope}近两次都有下降`,
+          detail: `两次合计下降 ${Math.abs(roundTo(rates.at(-1)! - rates.at(-3)!, 1))} 个百分点，建议了解最近的学习情况。`,
         });
       }
     }
@@ -2121,8 +2268,8 @@ export function analyzeStudentSignals(student: StudentRecord): StudentSignal[] {
         tone: "red",
         rule: "cliff-drop",
         ...base,
-        title: `${student.name} ${scope}最近一次降幅较大`,
-        detail: `得分率下降 ${Math.abs(lastDelta)} 个百分点,建议尽快了解原因。`,
+        title: `${student.name} ${scope}这次成绩下降较多`,
+        detail: `得分率下降 ${Math.abs(lastDelta)} 个百分点，建议尽快了解原因。`,
       });
     }
 
@@ -2132,8 +2279,8 @@ export function analyzeStudentSignals(student: StudentRecord): StudentSignal[] {
         tone: "yellow",
         rule: "anomaly-jump",
         ...base,
-        title: `${student.name} ${scope}最近一次涨幅较大`,
-        detail: `得分率上升 ${lastDelta} 个百分点,建议核对原始成绩。`,
+        title: `${student.name} ${scope}这次成绩提高较多`,
+        detail: `得分率上升 ${lastDelta} 个百分点，请确认原始成绩是否填写正确。`,
       });
     }
 
@@ -2143,8 +2290,8 @@ export function analyzeStudentSignals(student: StudentRecord): StudentSignal[] {
         tone: "yellow",
         rule: "maxscore-change",
         ...base,
-        title: `${student.name} ${scope}满分口径有变化`,
-        detail: `上次满分 ${previous.maxScore}、这次 ${latest.maxScore},建议核对是否录错。`,
+        title: `${student.name} ${scope}这次与上次满分不同`,
+        detail: `上次满分 ${previous.maxScore} 分，本次 ${latest.maxScore} 分，请确认是否填写正确。`,
       });
     }
   }
@@ -2197,8 +2344,8 @@ export function buildStudentInsights(student: StudentRecord, subject?: string): 
     if (rates[index] < rates[index - 1]) dropStreak += 1;
     else break;
   }
-  if (riseStreak >= 2) insights.push(`${targetSubject}连续 ${riseStreak} 次得分率上升，处于上升通道。`);
-  if (dropStreak >= 2) insights.push(`${targetSubject}连续 ${dropStreak} 次得分率下降，建议关注近期学习状态。`);
+  if (riseStreak >= 2) insights.push(`${targetSubject}连续 ${riseStreak} 次得分率提高，最近表现稳步向上。`);
+  if (dropStreak >= 2) insights.push(`${targetSubject}连续 ${dropStreak} 次得分率下降，需要了解最近的学习情况。`);
 
   const classAvgRate = latest.maxScore > 0 ? roundTo((latest.classAverage / latest.maxScore) * 100, 1) : null;
   if (classAvgRate !== null) {
@@ -2210,12 +2357,12 @@ export function buildStudentInsights(student: StudentRecord, subject?: string): 
 
   const subjects = getSubjectBreakdown(student);
   if (subjects.length > 1) {
-    insights.push(`相对较弱科目：${subjects.at(-1)!.subject}（得分率 ${subjects.at(-1)!.latestRate}%）。`);
-    insights.push(`相对优势科目：${subjects[0].subject}（得分率 ${subjects[0].latestRate}%）。`);
+    insights.push(`目前得分率较低的是${subjects.at(-1)!.subject}（${subjects.at(-1)!.latestRate}%）。`);
+    insights.push(`目前得分率较高的是${subjects[0].subject}（${subjects[0].latestRate}%）。`);
   }
 
   const spread = roundTo(Math.max(...rates) - Math.min(...rates), 1);
-  if (spread >= 20) insights.push(`${targetSubject}历史波动 ${spread} 个百分点，波动偏大，建议观察稳定性。`);
+  if (spread >= 20) insights.push(`${targetSubject}最高和最低相差 ${spread} 个百分点，表现还不够稳定。`);
 
   const change = getAssessmentChange(student, { subject: targetSubject });
   if (change.rankDelta !== null && Math.abs(change.rankDelta) >= 10) {
@@ -2322,7 +2469,7 @@ export function expandLessonsForRange(
   }
 
   return Array.from(result.values()).sort((left, right) => {
-    const timeOrder = left.startsAt.localeCompare(right.startsAt);
+    const timeOrder = new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime();
     return timeOrder === 0 ? left.id.localeCompare(right.id) : timeOrder;
   });
 }

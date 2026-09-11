@@ -55,6 +55,38 @@ test("parseDelimitedText handles commas, tabs, quotes and CRLF", () => {
   assert.deepEqual(parseDelimitedText('"两行\n内容",b'), [["两行\n内容", "b"]]);
   assert.deepEqual(parseDelimitedText(""), []);
   assert.deepEqual(parseDelimitedText("\n\n"), []);
+  assert.deepEqual(parseDelimitedText("\n\na,b\nc,d"), [["a", "b"], ["c", "d"]]);
+  assert.deepEqual(parseDelimitedText("标题\t备注\n课堂\t准备,打印;装订"), [["标题", "备注"], ["课堂", "准备,打印;装订"]]);
+  assert.deepEqual(parseDelimitedText("a,b\nc;d,e"), [["a", "b"], ["c;d", "e"]]);
+  assert.throws(() => parseDelimitedText('a,b\n"缺少结束引号,c'), /引号/);
+});
+
+test("assessment import rejects ambiguous headers and bad numbers without shifting columns", () => {
+  const missing = planAssessmentImport("姓名,班级,测评,日期,成绩,参考人数\n小明,一班,单元测,2026-10-12,80,40", []);
+  assert.equal(missing.entries.length, 0);
+  assert.match(missing.issues[0].message, /排名/);
+  const duplicate = planAssessmentImport("姓名,班级,测评,日期,满分,成绩,得分,排名,参考人数\n小明,一班,单元测,2026-10-12,100,80,90,2,40", []);
+  assert.equal(duplicate.entries.length, 0);
+  assert.match(duplicate.issues[0].message, /出现多次/);
+  for (const [maxScore, average] of [["abc", "80"], ["100", "abc"], ["0x64", "80"]]) {
+    const plan = planAssessmentImport(`小明,一班,单元测,2026-10-12,${maxScore},80,2,40,${average}`, []);
+    assert.equal(plan.entries.length, 0);
+    assert.equal(plan.issues.length, 1);
+  }
+  const optionalAbsent = planAssessmentImport("参考人数,排名,成绩,日期,测评,班级,姓名\n40,2,80,2026-10-12,单元测,一班,小明", []);
+  assert.equal(optionalAbsent.issues.length, 0);
+  assert.equal(optionalAbsent.entries[0].record.maxScore, 100);
+});
+
+test("assessment import preserves subjects and remains idempotent when a plan is reused", () => {
+  const now = "2026-10-12T20:00:00+08:00";
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, now);
+  const plan = planAssessmentImport("姓名,班级,测评,学科,日期,满分,成绩,排名,参考人数\n小明,一班,期中,语文,2026-10-12,100,80,2,40\n小明,一班,期中,数学,2026-10-12,100,82,3,40", []);
+  assert.equal(plan.entries.length, 2);
+  assert.equal(plan.issues.length, 0);
+  assert.deepEqual(applyAssessmentImportPlan(data, plan, now), { addedStudents: 1, addedAssessments: 2 });
+  assert.deepEqual(applyAssessmentImportPlan(data, plan, now), { addedStudents: 0, addedAssessments: 0 });
+  assert.equal(data.students[0].assessments.length, 2);
 });
 
 test("planAssessmentImport validates ranges, dates and duplicates", () => {
@@ -68,6 +100,14 @@ test("planAssessmentImport validates ranges, dates and duplicates", () => {
   assert.equal(valid.entries[0].isNewStudent, true);
   assert.equal(valid.entries[0].record.status, "待核对");
   assert.equal(valid.newStudentCount, 1);
+
+  const currentUiHeaders = planAssessmentImport(
+    "班级平均分,学生姓名,班级,测评名称,日期,满分,成绩,班级排名,班级人数\n79.5,王小明,八年级1班,单元三,2026-10-12,100,87,6,45",
+    data.students,
+  );
+  assert.equal(currentUiHeaders.issues.length, 0);
+  assert.equal(currentUiHeaders.entries[0].record.classAverage, 79.5);
+  assert.equal(currentUiHeaders.entries[0].record.cohortSize, 45);
 
   const outOfRange = planAssessmentImport("王小明,八1班,单元三,2026-10-12,100,187,6,45,79", []);
   assert.equal(outOfRange.entries.length, 0);
@@ -89,7 +129,7 @@ test("planAssessmentImport validates ranges, dates and duplicates", () => {
 
   const dupExisting = planAssessmentImport("李明澈,八年级4班,阶段测,2026-09-15,100,90,1,43,85", data.students);
   assert.equal(dupExisting.entries.length, 0);
-  assert.match(dupExisting.issues[0].message, /已存在/);
+  assert.match(dupExisting.issues[0].message, /已有名称和日期都相同/);
 });
 
 test("applyAssessmentImportPlan creates students and marks records unverified", () => {
@@ -173,7 +213,7 @@ test("planLessonImport validates times and conflicts", () => {
 
   const conflict = planLessonImport("班会,班会,八年级4班,2026-09-16,15:50,16:35,教室,,", data.lessons);
   assert.equal(conflict.entries.length, 0);
-  assert.match(conflict.issues[0].message, /已有课次/);
+  assert.match(conflict.issues[0].message, /已有课程/);
 
   const now = "2026-10-12T20:00:00+08:00";
   const updated = applyWorkbenchUpdate(
@@ -208,6 +248,27 @@ test("separate lesson imports in the same second reserve unique ids", () => {
 
   assert.equal(data.lessons.length, 2);
   assert.equal(new Set(data.lessons.map((lesson) => lesson.id)).size, data.lessons.length);
+});
+
+test("lesson import normalizes hours and rejects overlapping lessons and malformed reminders", () => {
+  const valid = planLessonImport("课程名称,学科,班级,日期,开始,结束,地点\n单元测,语文,一班,2026-10-13,9:00,10:00,101", []);
+  assert.equal(valid.issues.length, 0);
+  assert.equal(valid.entries[0].record.startsAt, "2026-10-13T09:00:00+08:00");
+  for (const reminder of ["-10", "1.5", "约10", "10x"]) {
+    assert.equal(planLessonImport(`单元测,语文,一班,2026-10-13,09:00,10:00,101,,${reminder}`, []).entries.length, 0);
+  }
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, "2026-10-01T00:00:00+08:00");
+  assert.equal(applyLessonImportPlan(data, valid, "2026-10-01T00:00:00+08:00"), 1);
+  assert.equal(applyLessonImportPlan(data, valid, "2026-10-01T00:01:00+08:00"), 0);
+  assert.equal(planLessonImport("第二节,数学,二班,2026-10-13,09:30,10:15,102,,", data.lessons).entries.length, 0);
+  const fileOverlap = planLessonImport("第一节,语文,一班,2026-10-14,9:00,10:00,101,,\n第二节,数学,二班,2026-10-14,09:30,10:15,102,,", []);
+  assert.equal(fileOverlap.entries.length, 1);
+  assert.match(fileOverlap.issues[0].message, /时间重叠/);
+  data.lessonTemplates = [{ id: "LT-CONFLICT", weekday: 3, startTime: "08:00", endTime: "08:45", title: "固定课", subject: "数学", className: "二班", room: "102", preparation: "", reminderMinutesBefore: null, semesterStart: "2026-10-01", semesterEnd: "2026-10-31" }];
+  data.lessonExceptions = [{ id: "MOVE", templateId: "LT-CONFLICT", date: "2026-10-14", action: "reschedule", newDate: "2026-10-15", newStartTime: "10:00", newEndTime: "10:45" }];
+  const rescheduled = planLessonImport("第三节,语文,三班,2026-10-15,10:15,11:00,103,,", data.lessons, data);
+  assert.equal(rescheduled.entries.length, 0);
+  assert.match(rescheduled.issues[0].message, /已有课程/);
 });
 
 test("export file round-trips through parseWorkbenchImportText", () => {
@@ -285,6 +346,19 @@ test("ICS calendar contains lessons, open tasks and reminder alarms", () => {
   assert.ok(ics.split("\r\n").every((line) => Buffer.byteLength(line, "utf8") <= 75));
 });
 
+test("task calendar alarms keep the chosen reminder time regardless of task duration", () => {
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, "2026-10-01T00:00:00+08:00");
+  data.tasks = [{ id: "T-ALARM", category: "教学", title: "备课", dueAt: "2026-10-12T12:00:00+08:00", estimatedMinutes: 60, status: "待开始", reminderAt: "2026-10-12T11:30:00+08:00" }];
+  const ics = buildIcsCalendar(data, "2026-10-12T08:00:00+08:00");
+  assert.match(ics, /DTSTART:20261012T030000Z/);
+  assert.match(ics, /TRIGGER;VALUE=DATE-TIME:20261012T033000Z/);
+  data.tasks[0].reminderAt = data.tasks[0].dueAt;
+  assert.match(buildIcsCalendar(data, "2026-10-12T08:00:00+08:00"), /TRIGGER;VALUE=DATE-TIME:20261012T040000Z/);
+  assert.equal(computeDueReminders(data, data.tasks[0].dueAt, new Set()).length, 1);
+  assert.equal(computeDueReminders(data, "2026-10-12T12:00:30+08:00", new Set()).length, 1);
+  assert.equal(computeDueReminders(data, "2026-10-12T12:01:00+08:00", new Set()).length, 0);
+});
+
 test("recurring and weekend lessons enter ICS and reminder computation", () => {
   const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, "2026-09-01T00:00:00+08:00");
   data.lessonTemplates = [{ id: "WEEKEND", weekday: 7, startTime: "09:00", endTime: "09:45", title: "周日课", subject: "数学", className: "教培1班", room: "教室1", preparation: "练习册", reminderMinutesBefore: 15, semesterStart: "2026-09-01", semesterEnd: "2026-09-30" }];
@@ -331,6 +405,44 @@ test("mobile view files are strict, minimal and stored separately from the works
   assert.equal(saveImportedMobileView(storage, snapshot).ok, true);
   assert.equal(storage.getItem("teacher-workbench:device-local:v1"), null);
   assert.deepEqual(loadImportedMobileView(storage).snapshot, snapshot);
+});
+
+test("mobile imports validate actual values and compare timestamps as instants", () => {
+  const snapshot = createMobileReadOnlySnapshot(createSeedWorkbenchData(), "2026-09-16T15:40:00+08:00");
+  const file = JSON.parse(serializeMobileViewFile(snapshot, snapshot.generatedAt));
+  const corruptions = [
+    (value) => { value.snapshot.priorityStudents[0].currentRank = -1; },
+    (value) => { value.snapshot.priorityStudents[0].latestScore = 9999; },
+    (value) => { value.snapshot.priorityStudents[1] = value.snapshot.priorityStudents[0]; },
+    (value) => { value.snapshot.upcomingLessons[0].endsAt = value.snapshot.upcomingLessons[0].startsAt; },
+    (value) => { value.snapshot.generatedAt = "2026-02-30T08:00:00+08:00"; },
+  ];
+  for (const corrupt of corruptions) {
+    const malformed = structuredClone(file);
+    corrupt(malformed);
+    assert.throws(() => parseMobileViewFile(JSON.stringify(malformed)));
+  }
+  const current = { ...snapshot, generatedAt: "2026-09-16T08:00:00Z" };
+  assert.equal(parseMobileViewFile(JSON.stringify(file), current).warnings.length, 1);
+  const failingStorage = { getItem() { throw new Error("SecurityError"); } };
+  assert.deepEqual(loadImportedMobileView(failingStorage), { snapshot: null, warning: "手机内容无法读取，请重新导入电脑生成的文件。" });
+});
+
+test("mobile files preserve long teacher text while enforcing the whole-file byte limit", () => {
+  const now = "2026-09-16T08:00:00+08:00";
+  const data = createEmptyWorkbenchData(createSeedWorkbenchData().user, now);
+  const title = "备课要求：整理例题和讲评思路。".repeat(100);
+  data.tasks = [{ id: "T-LONG", category: "教学", title, dueAt: "2026-09-16T18:00:00+08:00", estimatedMinutes: 30, status: "待开始", reminderAt: null }];
+  const snapshot = createMobileReadOnlySnapshot(data, now);
+  const text = serializeMobileViewFile(snapshot, now);
+  assert.equal(parseMobileViewFile(text).envelope.snapshot.openTasks[0].title, title);
+  assert.equal(data.tasks[0].title, title, "export must not shorten the desktop original");
+  const oversized = structuredClone(snapshot);
+  oversized.openTasks[0].title = "长".repeat(180_000);
+  assert.throws(() => serializeMobileViewFile(oversized, now), /512KB/);
+  const oversizedFile = JSON.parse(text);
+  oversizedFile.snapshot.openTasks[0].title = oversized.openTasks[0].title;
+  assert.throws(() => parseMobileViewFile(JSON.stringify(oversizedFile)), /512KB/);
 });
 
 test("computeDueReminders fires inside the reminder window only once", () => {
@@ -514,6 +626,15 @@ test("inbox quick-capture serializes, parses and converts to pending tasks", () 
   assert.throws(() => parseInbox("{}"), /没有识别到速记内容/);
 });
 
+test("inbox import never silently loses malformed notes or creates duplicate tasks", () => {
+  const item = { id: "N-ONE", text: "准备讲义", category: "教学", createdAt: "2026-09-16T08:00:00+08:00" };
+  assert.equal(parseInbox(serializeInbox([item, item])).length, 1);
+  assert.throws(() => parseInbox(serializeInbox([item, { ...item, text: "不同内容" }])), /编号相同/);
+  assert.throws(() => parseInbox(serializeInbox([item, { ...item, id: "N-TWO", text: "" }])), /本次没有导入任何/);
+  assert.throws(() => parseInbox(JSON.stringify({ kind: "wrong", version: 1, items: [item] })), /没有识别到/);
+  assert.throws(() => parseInbox(serializeInbox([{ ...item, createdAt: "2026-02-30" }])), /内容不完整/);
+});
+
 test("student signals: green streak, red streak, cliff drop, anomaly and maxscore change", async () => {
   const { analyzeStudentSignals, collectStudentSignals, buildStudentInsights, getSubjectBreakdown } = await import("../app/workbench-data.ts");
 
@@ -574,5 +695,5 @@ test("student signals: green streak, red streak, cliff drop, anomaly and maxscor
   const breakdown = getSubjectBreakdown(multi);
   assert.equal(breakdown.length, 2);
   const insights = buildStudentInsights(multi);
-  assert.ok(insights.some((text) => text.includes("相对较弱科目：数学")));
+  assert.ok(insights.some((text) => text.includes("目前得分率较低的是数学")));
 });

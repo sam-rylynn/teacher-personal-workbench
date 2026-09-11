@@ -32,11 +32,12 @@ test("server-renders the teacher workbench framework", async () => {
   assert.match(html, /教师个人工作台/);
   assert.match(html, /全部为虚构演示数据/);
   assert.match(html, /查看手机内容/);
-  assert.match(html, /学生看板/);
-  assert.match(html, /家校协同/);
+  assert.match(html, /查看全部学生|学生档案/);
+  assert.match(html, /家校沟通/);
   assert.match(html, /事项中心|今天先做这三件/);
   assert.match(html, /成绩、排名与近期动态/);
+  assert.match(html, /阅读单第3题还空着|请假后的阅读题还没补完/);
   assert.doesNotMatch(html, /学习证据|事实时间线/);
-  assert.doesNotMatch(html, /Agent|正式数据|置信度|加密数据包|仓库令牌|档案编号|129 名学生/);
+  assert.doesNotMatch(html, /Agent|正式数据|置信度|加密数据包|仓库令牌|档案编号|129 名学生|INVALID_|UNSUPPORTED_SCHEMA|snapshotVersion|sourceRevision|storageKind/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
