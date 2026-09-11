@@ -5,6 +5,7 @@ import {
   DESKTOP_DEVICE_LOCAL_ACCESS,
   MOBILE_READ_ONLY_ACCESS,
   WORKBENCH_BACKUP_KEY,
+  WORKBENCH_RECOVERY_KEY,
   WORKBENCH_STORAGE_KEY,
   applyWorkbenchUpdate,
   checkWorkbenchWriteAccess,
@@ -13,6 +14,7 @@ import {
   deleteAssessmentRecord,
   getAssessmentChange,
   loadDeviceLocalWorkbench,
+  listDeviceLocalRecoveryCopies,
   migrateWorkbenchData,
   reviewAssessmentRecord,
   saveDeviceLocalWorkbench,
@@ -190,6 +192,8 @@ test("ordinary saves preserve unreadable data until an explicit restore or reset
     allowReplaceInvalidStoredData: true,
   });
   assert.equal(restored.ok, true);
+  assert.deepEqual(listDeviceLocalRecoveryCopies(storage), [{ savedAt: recovered.meta.updatedAt, payload: original }]);
+  assert.equal(storage.getItem(WORKBENCH_BACKUP_KEY), null, "an unreadable original is not offered as a normal restorable backup");
   const savedValue = storage.getItem(WORKBENCH_STORAGE_KEY);
   const invalid = structuredClone(recovered);
   invalid.students[0].assessments[0].score = 999;
@@ -197,6 +201,65 @@ test("ordinary saves preserve unreadable data until an explicit restore or reset
   assert.equal(invalidSave.ok, false);
   assert.equal(invalidSave.reason, "invalid-data");
   assert.equal(storage.getItem(WORKBENCH_STORAGE_KEY), savedValue);
+
+  for (let index = 0; index < 4; index += 1) {
+    const next = applyWorkbenchUpdate(recovered, DESKTOP_DEVICE_LOCAL_ACCESS, (draft) => {
+      draft.tasks[0].title = `后续保存 ${index}`;
+    }, "2026-10-01T10:00:00+08:00");
+    assert.equal(saveDeviceLocalWorkbench(next, { access: DESKTOP_DEVICE_LOCAL_ACCESS, storage }).ok, true);
+  }
+  assert.equal(listDeviceLocalRecoveryCopies(storage)[0].payload, original, "normal rolling saves must not discard the repair source");
+});
+
+test("restoring stops if the original content cannot be backed up exactly", () => {
+  const original = "{original teacher records";
+  const data = createSeedWorkbenchData();
+  for (const failureMode of ["throws", "does-not-persist", "unreadable-archive"]) {
+    class FailingRecoveryStorage extends MemoryStorage {
+      setItem(key, value) {
+        if (key === WORKBENCH_RECOVERY_KEY && failureMode === "throws") throw new Error("QuotaExceededError");
+        if (key === WORKBENCH_RECOVERY_KEY && failureMode === "does-not-persist") return;
+        super.setItem(key, value);
+      }
+    }
+    const storage = new FailingRecoveryStorage();
+    storage.setItem(WORKBENCH_STORAGE_KEY, original);
+    if (failureMode === "unreadable-archive") storage.setItem(WORKBENCH_RECOVERY_KEY, "existing unreadable archive");
+    const result = saveDeviceLocalWorkbench(data, {
+      access: DESKTOP_DEVICE_LOCAL_ACCESS,
+      storage,
+      allowReplaceInvalidStoredData: true,
+    });
+    assert.equal(result.ok, false, failureMode);
+    assert.equal(result.reason, "recovery-backup-failed", failureMode);
+    assert.equal(storage.getItem(WORKBENCH_STORAGE_KEY), original, failureMode);
+    assert.equal(storage.getItem(WORKBENCH_BACKUP_KEY), null, failureMode);
+  }
+
+  for (const failureMode of ["throws", "does-not-persist"]) {
+    class FailingRollingStorage extends MemoryStorage {
+      setItem(key, value) {
+        if (key === WORKBENCH_BACKUP_KEY) {
+          if (failureMode === "throws") throw new Error("QuotaExceededError");
+          return;
+        }
+        super.setItem(key, value);
+      }
+    }
+    const storage = new FailingRollingStorage();
+    assert.equal(saveDeviceLocalWorkbench(data, { access: DESKTOP_DEVICE_LOCAL_ACCESS, storage }).ok, true);
+    const storedBeforeRestore = storage.getItem(WORKBENCH_STORAGE_KEY);
+    const replacement = structuredClone(data);
+    replacement.tasks = [];
+    const result = saveDeviceLocalWorkbench(replacement, {
+      access: DESKTOP_DEVICE_LOCAL_ACCESS,
+      storage,
+      allowReplaceInvalidStoredData: true,
+    });
+    assert.equal(result.ok, false, `valid original: ${failureMode}`);
+    assert.equal(result.reason, "recovery-backup-failed", failureMode);
+    assert.equal(storage.getItem(WORKBENCH_STORAGE_KEY), storedBeforeRestore, failureMode);
+  }
 });
 
 test("mobile snapshots use the teacher local day and compare real instants across offsets", () => {

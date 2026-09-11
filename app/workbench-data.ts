@@ -16,6 +16,8 @@ export const LEGACY_WORKBENCH_STORAGE_KEYS = [
 ] as const;
 export const WORKBENCH_BACKUP_KEY =
   `teacher-workbench:${WORKBENCH_STORAGE_KIND}:v${WORKBENCH_SCHEMA_VERSION}:backups` as const;
+export const WORKBENCH_RECOVERY_KEY =
+  `teacher-workbench:${WORKBENCH_STORAGE_KIND}:v${WORKBENCH_SCHEMA_VERSION}:unreadable-originals` as const;
 export const WORKBENCH_BACKUP_LIMIT = 3 as const;
 export const MAX_LESSON_REMINDER_MINUTES = 7 * 24 * 60;
 
@@ -302,13 +304,19 @@ export type DeviceLocalSaveResult =
   | {
       ok: false;
       storageKey: string;
-      reason: "storage-unavailable" | "read-only" | "storage-error" | "invalid-data" | "invalid-stored-data";
+      reason: "storage-unavailable" | "read-only" | "storage-error" | "invalid-data" | "invalid-stored-data" | "recovery-backup-failed";
       message: string;
     };
 
 export interface WorkbenchBackupEntry {
   savedAt: string;
   revision: number;
+  payload: string;
+}
+
+/** An unchanged, unreadable original for download and repair, not a restorable workspace. */
+export interface WorkbenchRecoveryCopy {
+  savedAt: string;
   payload: string;
 }
 
@@ -2004,25 +2012,60 @@ export function listDeviceLocalBackups(storage: StorageLike): WorkbenchBackupEnt
   }
 }
 
+function readDeviceLocalRecoveryCopies(storage: StorageLike): WorkbenchRecoveryCopy[] {
+  const raw = storage.getItem(WORKBENCH_RECOVERY_KEY);
+  if (raw === null) return [];
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed) || !parsed.every((entry) =>
+    isRecord(entry) && isValidInstant(entry.savedAt) && typeof entry.payload === "string",
+  )) {
+    throw new Error("INVALID_RECOVERY_COPIES");
+  }
+  return parsed as WorkbenchRecoveryCopy[];
+}
+
+/** Lists original strings for export. They are never offered as normal workbench backups. */
+export function listDeviceLocalRecoveryCopies(storage: StorageLike): WorkbenchRecoveryCopy[] {
+  try {
+    return readDeviceLocalRecoveryCopies(storage);
+  } catch {
+    return [];
+  }
+}
+
+/** Kept outside rolling backups so ordinary saves cannot discard the repair source. */
+function preserveDeviceLocalRecoveryCopy(storage: StorageLike, payload: string, savedAt: string): void {
+  const copies = readDeviceLocalRecoveryCopies(storage);
+  if (copies.some((copy) => copy.payload === payload)) return;
+  const serialized = JSON.stringify([{ savedAt, payload }, ...copies]);
+  storage.setItem(WORKBENCH_RECOVERY_KEY, serialized);
+  if (storage.getItem(WORKBENCH_RECOVERY_KEY) !== serialized) {
+    throw new Error("RECOVERY_COPY_NOT_SAVED");
+  }
+}
+
 /**
  * Rotates rolling backups before the current value is overwritten. The most
  * recent backup is kept first; at most WORKBENCH_BACKUP_LIMIT are retained.
- * Rotation failures never block the primary save.
+ * Returns whether the exact previous value is recoverable. Ordinary edits
+ * keep their best-effort backup policy; an explicit restore requires success.
  */
-export function rotateDeviceLocalBackup(storage: StorageLike, currentEnvelopeJson: string | null, now: string): void {
-  if (!currentEnvelopeJson) return;
+export function rotateDeviceLocalBackup(storage: StorageLike, currentEnvelopeJson: string | null, now: string): boolean {
+  if (currentEnvelopeJson === null) return true;
   try {
     const parsed = JSON.parse(currentEnvelopeJson) as { data?: { meta?: { revision?: number } } };
     const revision = parsed.data?.meta?.revision ?? 0;
     const backups = listDeviceLocalBackups(storage);
-    if (backups[0]?.payload === currentEnvelopeJson) return;
+    if (backups[0]?.payload === currentEnvelopeJson) return true;
     const next: WorkbenchBackupEntry[] = [
       { savedAt: now, revision, payload: currentEnvelopeJson },
       ...backups,
     ].slice(0, WORKBENCH_BACKUP_LIMIT);
-    storage.setItem(WORKBENCH_BACKUP_KEY, JSON.stringify(next));
+    const serialized = JSON.stringify(next);
+    storage.setItem(WORKBENCH_BACKUP_KEY, serialized);
+    return storage.getItem(WORKBENCH_BACKUP_KEY) === serialized;
   } catch {
-    // Backup rotation must never block the primary save.
+    return false;
   }
 }
 
@@ -2080,16 +2123,30 @@ export function saveDeviceLocalWorkbench(
     };
     // Keep the previous version recoverable before overwriting it.
     const storedBeforeSave = storage.getItem(WORKBENCH_STORAGE_KEY);
-    if (storedBeforeSave !== null && !options.allowReplaceInvalidStoredData) {
+    let storedBeforeSaveIsValid = true;
+    if (storedBeforeSave !== null) {
       try {
         migrateWorkbenchData(JSON.parse(storedBeforeSave), savedAt);
       } catch {
-        return {
-          ok: false,
-          storageKey: WORKBENCH_STORAGE_KEY,
-          reason: "invalid-stored-data",
-          message: "原有内容暂时无法读取，已暂停保存以保留原内容。请在“数据与备份”中恢复备份后继续。",
-        };
+        storedBeforeSaveIsValid = false;
+        if (!options.allowReplaceInvalidStoredData) {
+          return {
+            ok: false,
+            storageKey: WORKBENCH_STORAGE_KEY,
+            reason: "invalid-stored-data",
+            message: "原有内容暂时无法读取，已暂停保存以保留原内容。请在“数据与备份”中恢复备份后继续。",
+          };
+        }
+        try {
+          preserveDeviceLocalRecoveryCopy(storage, storedBeforeSave, savedAt);
+        } catch {
+          return {
+            ok: false,
+            storageKey: WORKBENCH_STORAGE_KEY,
+            reason: "recovery-backup-failed",
+            message: "原始内容未能备份，本次恢复没有覆盖任何内容。请检查设备空间后重试。",
+          };
+        }
       }
     }
     const previousEnvelope = !storedBeforeSave && options.previousDataForBackup
@@ -2100,7 +2157,17 @@ export function saveDeviceLocalWorkbench(
           data: normalizeStoredV1(options.previousDataForBackup),
         } satisfies StoredWorkbenchEnvelopeV1)
       : null;
-    rotateDeviceLocalBackup(storage, storedBeforeSave ?? previousEnvelope, savedAt);
+    if (storedBeforeSaveIsValid) {
+      const backedUp = rotateDeviceLocalBackup(storage, storedBeforeSave ?? previousEnvelope, savedAt);
+      if (!backedUp && options.allowReplaceInvalidStoredData) {
+        return {
+          ok: false,
+          storageKey: WORKBENCH_STORAGE_KEY,
+          reason: "recovery-backup-failed",
+          message: "原始内容未能备份，本次恢复没有覆盖任何内容。请检查设备空间后重试。",
+        };
+      }
+    }
     storage.setItem(WORKBENCH_STORAGE_KEY, JSON.stringify(envelope));
     return { ok: true, storageKey: WORKBENCH_STORAGE_KEY, savedAt };
   } catch {

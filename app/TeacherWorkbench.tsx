@@ -20,6 +20,7 @@ import {
   getSubjectBreakdown,
   getDeviceLocalDate,
   listDeviceLocalBackups,
+  listDeviceLocalRecoveryCopies,
   loadDeviceLocalWorkbench,
   rankPriorityStudents,
   reviewAssessmentRecord,
@@ -512,7 +513,7 @@ export default function TeacherWorkbench() {
       const saved = saveDeviceLocalWorkbench(next, { access, savedAt: now, previousDataForBackup: workspace, ...options });
       if (!saved.ok) {
         if (saved.reason === "invalid-stored-data") setStorageWarning(saved.message);
-        setToast(saved.reason === "invalid-stored-data" || saved.reason === "invalid-data" ? saved.message : "没有保存成功，请检查当前浏览器是否允许保存数据，并确认设备还有可用空间。");
+        setToast(saved.message);
         return null;
       }
       setWorkspace(next);
@@ -1199,6 +1200,7 @@ export default function TeacherWorkbench() {
           data={workspace}
           onClose={() => setDataManageOpen(false)}
           onExportData={exportDataFile}
+          onExportRaw={(payload) => downloadTextFile("教师工作台-保留的原始内容.txt", payload, "text/plain")}
           onExportCalendar={exportCalendarFile}
           onRestoreFile={restoreFromText}
           onRestoreBackup={restoreFromBackup}
@@ -2456,6 +2458,7 @@ function DataManageModal({
   data,
   onClose,
   onExportData,
+  onExportRaw,
   onExportCalendar,
   onRestoreFile,
   onRestoreBackup,
@@ -2466,6 +2469,7 @@ function DataManageModal({
   data: WorkbenchData;
   onClose: () => void;
   onExportData: () => void;
+  onExportRaw: (payload: string) => void;
   onExportCalendar: () => void;
   onRestoreFile: (text: string, sourceLabel: string) => boolean;
   onRestoreBackup: (entry: WorkbenchBackupEntry) => boolean;
@@ -2480,6 +2484,10 @@ function DataManageModal({
     } catch {
       return [];
     }
+  });
+  const [recoveryCopies] = useState(() => {
+    if (typeof window === "undefined") return [];
+    try { return listDeviceLocalRecoveryCopies(window.localStorage); } catch { return []; }
   });
   const [pendingFile, setPendingFile] = useState<{ name: string; text: string; students: number; lessons: number; tasks: number; warnings: string[] } | null>(null);
   const [fileError, setFileError] = useState("");
@@ -2568,6 +2576,8 @@ function DataManageModal({
             </div>
           ) : <p className="data-empty">还没有自动备份，保存一次修改后就会出现。</p>}
         </section>
+
+        {recoveryCopies.length ? <section className="data-section"><div className="data-section-head"><h3>保留的原始内容</h3><p>恢复前留下的异常内容，尚不能直接恢复。可以先保存到电脑，交给你使用的助手检查和修复；这份内容不会随自动备份更新而删除。</p></div><div className="backup-list">{recoveryCopies.map((entry, index) => <div className="backup-row" key={`${entry.savedAt}-${index}`}><span><strong>{formatDateTime(entry.savedAt)}</strong><small>未经改动的原始内容</small></span><button type="button" className="button button-ghost" onClick={() => onExportRaw(entry.payload)}>保存原始内容</button></div>)}</div></section> : null}
 
         <section className="data-section">
           <div className="data-section-head"><h3>手机速记导入</h3><p>把手机上“复制速记”的内容粘贴到这里，存为待办事项。</p></div>
