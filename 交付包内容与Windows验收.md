@@ -18,17 +18,17 @@
 
 | 项目 | 内容 |
 |---|---|
-| 源码 | 与交付提交一致的完整私有仓库内容 |
+| 源码 | 与交付提交一致的开源源码，或老师自己的源码副本 |
 | 依赖锁定 | `package.json`、`package-lock.json`、`.node-version`、`.nvmrc` |
 | 通用启动 | `scripts/run-vinext.mjs`、`scripts/launch-workbench.mjs`、`scripts/build-state.mjs` |
 | Windows 启动 | `启动工作台.bat` |
 | macOS 启动 | `启动工作台.command` |
 | 使用说明 | `README.md`、`销售部署说明.md`、本 Runbook |
-| 授权文本 | `授权协议.md` |
+| 授权文本 | `LICENSE`、版权声明与 `授权协议.md` |
 
 交付时另行记录：
 
-- 私有仓库地址；
+- 源码仓库地址（公开仓库或老师自己的仓库）；
 - 实际提交哈希或正式标签；
 - 目标操作系统与浏览器版本；
 - 电脑访问地址；
@@ -42,7 +42,7 @@
 - Windows 10/11 或当前受支持的 macOS；
 - Node.js `22.13.0` 或更高；
 - npm 可用；
-- Git 可访问老师自己的私有仓库；
+- Git 可访问项目公开仓库，或老师自己选定的源码仓库；
 - Chrome、Edge 或 Safari 等现代浏览器；
 - 如果验收手机查看，需要一个手机能实际访问的工作台页面入口和一台真实手机。
 
@@ -61,7 +61,7 @@ git --version
 ### 1. 获取候选源码
 
 ```powershell
-git clone <老师的私有仓库地址>
+git clone <源码仓库地址>
 cd teacher-personal-workbench
 git checkout <交付提交或标签>
 git status --short
@@ -109,7 +109,7 @@ npm run launch
 ### 1. 获取源码并安装
 
 ```bash
-git clone <老师的私有仓库地址>
+git clone <源码仓库地址>
 cd teacher-personal-workbench
 git checkout <交付提交或标签>
 git status --short
@@ -227,4 +227,6 @@ macOS 同样需要保持固定浏览器与访问地址。代码修改后重新�
 
 ## 十一、授权边界摘要
 
-永久个人使用与修改；**禁止转售、传播、代售**。法律条款以仓库内《授权协议.md》为准。
+代码采用根目录 [LICENSE](LICENSE) 中的 MIT License，允许商用、修改、再分发和有偿部署；软件副本或重要部分须保留版权声明及许可声明。第三方依赖遵循各自许可证。中文说明见《授权协议.md》。
+
+自行安装无需购买服务。可选首装服务的费用、范围、目标设备和验收结果单独约定，不改变 MIT 授予的代码权利，也不自动包含持续维护。无论自行安装还是购买服务，真实学生与家长资料、备份、手机文件及密钥都不得上传公共仓库。
